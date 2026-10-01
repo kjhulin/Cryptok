@@ -18,7 +18,7 @@ jobs:
           - { os: windows-latest, name: windows-x86_64, exe: cryptok.exe, target: '' }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -40,7 +40,7 @@ jobs:
           cp target/release/${{ matrix.exe }} README.md LICENSE.txt "$d"/
           cp -r corpus data "$d"/
           if [ "${{ runner.os }}" = "Windows" ]; then 7z a "$d.zip" "$d"; else tar czf "$d.tar.gz" "$d"; fi
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: cryptok-${{ matrix.name }}
           path: cryptok-${{ matrix.name }}.*
@@ -49,10 +49,10 @@ jobs:
     # Pre-trained model so users can skip `cryptok train`.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo run --release -- train --out cryptok.cklm
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: cryptok-model
           path: cryptok.cklm
@@ -62,7 +62,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           path: dist
           merge-multiple: true
