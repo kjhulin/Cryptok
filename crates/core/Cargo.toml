@@ -1,0 +1,10 @@
+[package]
+name = "cryptok-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Cipher-solving core: character language model, running key cipher solver, classic ciphers"
+
+[lib]
+name = "cryptok_core"
