@@ -337,6 +337,44 @@ impl LangModel {
     pub fn contexts_per_level(&self) -> Vec<usize> {
         self.levels.iter().map(|l| l.rows.len() / ALPHABET).collect()
     }
+
+    /// Dense table of `ln P(last | previous n-1 letters)` for every n-gram (n <= order+1).
+    /// Used by hill-climbing solvers, where a flat array lookup beats hashing.
+    pub fn dense(&self, n: usize) -> DenseNgram {
+        assert!(n >= 1 && n <= self.order + 1 && n <= 6, "dense n-gram size out of range");
+        let ctxs = 26usize.pow(n as u32 - 1);
+        let mut t = vec![0f32; ctxs * ALPHABET];
+        for ctx in 0..ctxs {
+            let row = self.row(ctx as u64, n - 1);
+            for w in 0..ALPHABET {
+                t[ctx * ALPHABET + w] = self.deq[row[w] as usize];
+            }
+        }
+        DenseNgram { n, t }
+    }
+}
+
+/// Flat n-gram log-probability table (see [`LangModel::dense`]).
+pub struct DenseNgram {
+    pub n: usize,
+    t: Vec<f32>,
+}
+
+impl DenseNgram {
+    /// Log-prob of the n-gram ending at `end` (requires `end + 1 >= n`).
+    #[inline]
+    pub fn window(&self, s: &[u8], end: usize) -> f32 {
+        let mut idx = 0usize;
+        for &c in &s[end + 1 - self.n..=end] {
+            idx = idx * 26 + c as usize;
+        }
+        unsafe { *self.t.get_unchecked(idx) }
+    }
+
+    /// Sum over all complete n-gram windows.
+    pub fn score(&self, s: &[u8]) -> f32 {
+        (self.n.saturating_sub(1)..s.len()).map(|e| self.window(s, e)).sum()
+    }
 }
 
 fn lv_keys(lv: &Level, out: &mut [u64]) {

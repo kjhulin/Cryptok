@@ -198,14 +198,15 @@ fn cmd_vigenere(a: &Args) -> Result<(), String> {
     }
     let lm = load_model(a)?;
     let max_period = a.num("max-period", 20)?;
-    let restarts = a.num("restarts", 10)?;
+    let restarts = a.num("restarts", 30)?;
     let results = a.num("results", 3)?;
     let alphabets: Vec<String> = a.get("alphabet", "").split(',').map(|s| s.trim().to_string()).collect();
     let t = Instant::now();
     let mut all = Vec::new();
+    let q = lm.dense(cryptok_core::classic::climb_ngram_size(&lm, cipher.len()));
     for kw in &alphabets {
         let alpha = cryptok_core::classic::Alphabet::from_keyword(kw);
-        all.extend(cryptok_core::classic::solve_vigenere(&lm, &cipher, &alpha, max_period, restarts).into_iter().take(results));
+        all.extend(cryptok_core::classic::solve_vigenere_with(&lm, &q, &cipher, &alpha, max_period, restarts).into_iter().take(results));
     }
     let pen = 26f32.ln();
     all.sort_by(|x, y| (y.score - y.period as f32 * pen).total_cmp(&(x.score - x.period as f32 * pen)));

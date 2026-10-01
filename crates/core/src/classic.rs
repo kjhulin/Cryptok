@@ -1,7 +1,7 @@
 //! Classic ciphers. Currently: periodic Vigenère with an optional keyed alphabet
 //! (Quagmire III — the system used for Kryptos K1 and K2).
 
-use crate::lm::LangModel;
+use crate::lm::{DenseNgram, LangModel};
 
 /// A mixed alphabet built from a keyword (duplicates dropped, remaining letters appended).
 #[derive(Clone, Debug, PartialEq)]
@@ -81,6 +81,14 @@ pub fn vigenere_encrypt(plain: &[u8], key: &[u8], a: &Alphabet) -> Vec<u8> {
         .collect()
 }
 
+const POLISH: usize = 3;
+
+/// N-gram size for hill climbing: short texts need 5-grams to separate English from
+/// junk; long texts are well served by cache-friendly quadgrams.
+pub fn climb_ngram_size(lm: &LangModel, letters: usize) -> usize {
+    (if letters < 150 { 5 } else { 4 }).min(lm.order() + 1)
+}
+
 struct Rng(u64);
 impl Rng {
     fn next(&mut self) -> u64 {
@@ -91,80 +99,164 @@ impl Rng {
     }
 }
 
-/// Hill-climb the column shifts for a fixed period. Returns (shifts, score).
-fn climb(lm: &LangModel, cipher: &[u8], a: &Alphabet, mut shifts: Vec<u8>) -> (Vec<u8>, f32) {
-    let mut best = lm.score(&vigenere_decrypt(cipher, &shifts, a));
+/// Hill-climb the column shifts for a fixed period using a dense n-gram table.
+/// Changing one column only affects the n-gram windows touching that column, so
+/// each trial is scored incrementally. Returns (shifts, n-gram score).
+fn climb(q: &DenseNgram, cipher: &[u8], a: &Alphabet, mut shifts: Vec<u8>) -> (Vec<u8>, f32) {
+    let n = cipher.len();
+    let period = shifts.len();
+    let w = q.n;
+    let mut buf = vigenere_decrypt(cipher, &shifts, a);
+    let mut cur = q.score(&buf);
+    let set_col = |buf: &mut [u8], col: usize, s: u8| {
+        for i in (col..n).step_by(period) {
+            buf[i] = a.letters[((a.index[cipher[i] as usize] + 26 - s) % 26) as usize];
+        }
+    };
+    // Window end positions affected by each column (exact when period >= w; else full rescoring).
+    let incremental = period >= w;
+    let ends: Vec<Vec<usize>> = (0..period)
+        .map(|col| {
+            let mut v = Vec::new();
+            for p in (col..n).step_by(period) {
+                for e in p..(p + w).min(n) {
+                    if e + 1 >= w {
+                        v.push(e);
+                    }
+                }
+            }
+            v
+        })
+        .collect();
+    let part = |buf: &[u8], col: usize| -> f32 { ends[col].iter().map(|&e| q.window(buf, e)).sum() };
     loop {
         let mut improved = false;
-        for col in 0..shifts.len() {
+        for col in 0..period {
             let orig = shifts[col];
-            let mut col_best = (orig, best);
+            let base = if incremental { cur - part(&buf, col) } else { 0.0 };
+            let mut col_best = (orig, cur);
             for s in 0..26u8 {
                 if s == orig {
                     continue;
                 }
-                shifts[col] = s;
-                let sc = lm.score(&vigenere_decrypt(cipher, &shifts, a));
-                if sc > col_best.1 {
+                set_col(&mut buf, col, s);
+                let sc = if incremental { base + part(&buf, col) } else { q.score(&buf) };
+                if sc > col_best.1 + 1e-4 {
                     col_best = (s, sc);
                 }
             }
             shifts[col] = col_best.0;
-            if col_best.1 > best + 1e-4 {
-                best = col_best.1;
+            set_col(&mut buf, col, col_best.0);
+            if col_best.0 != orig {
+                cur = col_best.1;
                 improved = true;
             }
         }
         if !improved {
-            return (shifts, best);
+            return (shifts, cur);
+        }
+    }
+}
+
+/// Coordinate ascent on the column shifts using the full language model (slower, sharper).
+fn polish(lm: &LangModel, cipher: &[u8], a: &Alphabet, mut shifts: Vec<u8>) -> (Vec<u8>, f32) {
+    let period = shifts.len();
+    let mut buf = vigenere_decrypt(cipher, &shifts, a);
+    let mut cur = lm.score(&buf);
+    let set_col = |buf: &mut [u8], col: usize, s: u8| {
+        for i in (col..cipher.len()).step_by(period) {
+            buf[i] = a.letters[((a.index[cipher[i] as usize] + 26 - s) % 26) as usize];
+        }
+    };
+    loop {
+        let mut improved = false;
+        for col in 0..period {
+            let orig = shifts[col];
+            let mut col_best = (orig, cur);
+            for s in 0..26u8 {
+                if s == orig {
+                    continue;
+                }
+                set_col(&mut buf, col, s);
+                let sc = lm.score(&buf);
+                if sc > col_best.1 + 1e-4 {
+                    col_best = (s, sc);
+                }
+            }
+            shifts[col] = col_best.0;
+            set_col(&mut buf, col, col_best.0);
+            if col_best.0 != orig {
+                cur = col_best.1;
+                improved = true;
+            }
+        }
+        if !improved {
+            return (shifts, cur);
         }
     }
 }
 
 /// Solve a periodic Vigenère cipher over the given alphabet, trying every period
-/// up to `max_period`. Periods are compared with a penalty of ln(26) per key letter
-/// so that multiples of the true period do not win by over-fitting.
+/// up to `max_period`. Hill climbing uses a fast quadgram table with random restarts;
+/// candidates are then rescored with the full language model and compared with a
+/// penalty of ln(26) per key letter, so multiples of the true period do not win by
+/// over-fitting.
 pub fn solve_vigenere(lm: &LangModel, cipher: &[u8], a: &Alphabet, max_period: usize, restarts: usize) -> Vec<VigenereSolution> {
+    let q = lm.dense(climb_ngram_size(lm, cipher.len()));
+    solve_vigenere_with(lm, &q, cipher, a, max_period, restarts)
+}
+
+/// As [`solve_vigenere`] with a pre-built dense table (reuse it across alphabets).
+pub fn solve_vigenere_with(lm: &LangModel, q: &DenseNgram, cipher: &[u8], a: &Alphabet, max_period: usize, restarts: usize) -> Vec<VigenereSolution> {
     let n = cipher.len();
     if n == 0 {
         return vec![];
     }
     let uni = lm.row(0, 0);
     let deq = lm.deq();
+    let pen = (26f32).ln();
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
-    let mut out = Vec::new();
+    let mut out: Vec<VigenereSolution> = Vec::new();
     for period in 1..=max_period.min(n) {
         // Initialise each column with its best shift under the unigram model.
         let init: Vec<u8> = (0..period)
             .map(|col| {
-                (0..26u8)
-                    .max_by(|&x, &y| {
-                        let f = |s: u8| -> f32 {
-                            cipher
-                                .iter()
-                                .skip(col)
-                                .step_by(period)
-                                .map(|&c| deq[uni[a.letters[((a.index[c as usize] + 26 - s) % 26) as usize] as usize] as usize])
-                                .sum()
-                        };
-                        f(x).total_cmp(&f(y))
-                    })
-                    .unwrap()
+                let f = |s: u8| -> f32 {
+                    cipher
+                        .iter()
+                        .skip(col)
+                        .step_by(period)
+                        .map(|&c| deq[uni[a.letters[((a.index[c as usize] + 26 - s) % 26) as usize] as usize] as usize])
+                        .sum()
+                };
+                (0..26u8).max_by(|&x, &y| f(x).total_cmp(&f(y))).unwrap()
             })
             .collect();
-        let mut best = climb(lm, cipher, a, init);
+        // Fast quadgram climbs from the unigram start and random restarts...
+        let mut cands = vec![climb(q, cipher, a, init)];
         for _ in 0..restarts {
             let start: Vec<u8> = (0..period).map(|_| (rng.next() % 26) as u8).collect();
-            let r = climb(lm, cipher, a, start);
+            cands.push(climb(q, cipher, a, start));
+        }
+        cands.sort_by(|x, y| y.1.total_cmp(&x.1));
+        cands.dedup_by(|x, y| x.0 == y.0);
+        // ...then polish the most promising with the full model (short texts need it).
+        let mut best: (Vec<u8>, f32) = (vec![], f32::NEG_INFINITY);
+        for c in cands.into_iter().take(if n < 150 { POLISH } else { 1 }) {
+            let r = polish(lm, cipher, a, c.0);
             if r.1 > best.1 {
                 best = r;
             }
         }
         let plain = vigenere_decrypt(cipher, &best.0, a);
-        let key = best.0.iter().map(|&s| a.letters[s as usize]).collect();
-        out.push(VigenereSolution { period, key, alphabet: a.as_string(), plain, score: best.1 });
+        out.push(VigenereSolution {
+            period,
+            key: best.0.iter().map(|&s| a.letters[s as usize]).collect(),
+            alphabet: a.as_string(),
+            score: best.1,
+            plain,
+        });
     }
-    let pen = (26f32).ln();
     // Drop solutions whose key just repeats a shorter key (e.g. ABSCISSAABSCISSA).
     out.retain(|s| !(1..s.period).any(|d| s.period % d == 0 && (d..s.period).all(|i| s.key[i] == s.key[i - d])));
     out.sort_by(|x, y| (y.score - y.period as f32 * pen).total_cmp(&(x.score - x.period as f32 * pen)));
