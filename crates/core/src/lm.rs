@@ -13,7 +13,7 @@ use crate::map::{FxHashMap, U64Map};
 use crate::text::{scrub, strip_gutenberg, ALPHABET};
 use std::fs;
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Quantisation step for log-probabilities (nats). u8 covers 0 .. -25.5.
 pub const STEP: f32 = 0.1;
@@ -114,17 +114,8 @@ impl LangModel {
 
     /// Train from a directory of text files (Gutenberg boilerplate is stripped).
     /// Files whose names appear in `exclude` are skipped.
-    pub fn train_dir(dir: &Path, order: usize, exclude: &[String]) -> io::Result<(Self, TrainStats)> {
-        let mut names: Vec<_> = fs::read_dir(dir)?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.is_file())
-            .filter(|p| {
-                let n = p.file_name().unwrap().to_string_lossy().to_string();
-                !exclude.iter().any(|x| *x == n)
-            })
-            .collect();
-        names.sort();
+    pub fn train_dir(dirs: &[PathBuf], order: usize, exclude: &[String]) -> io::Result<(Self, TrainStats)> {
+        let names = crate::text::corpus_files(dirs, exclude)?;
         let mut texts = Vec::with_capacity(names.len());
         for p in names {
             let mut buf = Vec::new();

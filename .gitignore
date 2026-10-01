@@ -1,3 +1,4 @@
 bench/private/
 /target
 *.cklm
+corpus-extra/

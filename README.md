@@ -37,6 +37,19 @@ cryptok vigenere --alphabet ",KRYPTOS" "$(cat bench/kryptos/k2.txt)"
 cryptok score "some text"                      # language-model score
 ```
 
+## Training text
+
+`corpus/` (committed) holds Project Gutenberg books and US presidential speeches (public domain).
+Gutenberg is mostly 19th-century prose, so `scripts/fetch-corpora.sh` can add modern text from the
+NLTK data repository (Brown corpus, Reuters newswire, movie reviews, web text) into `corpus-extra/`.
+That text is research-licensed, so it is git-ignored and never committed; `cryptok train` picks it up
+automatically when present (`--corpus corpus,corpus-extra`). Training also writes `cryptok.words`,
+the word list used by the word model, next to the model.
+
+On held-out text, adding the extra corpora lifts running-key accuracy on modern text from 58% to 74% and
+on the DEF CON 20 cipher from 68% to 74%, at a small cost on 19th-century books (83% to 82%).
+Release binaries ship a model trained with all of it.
+
 ## Releases and CI
 
 GitHub Actions runs build + tests on Linux, macOS and Windows for every PR, plus an accuracy gate

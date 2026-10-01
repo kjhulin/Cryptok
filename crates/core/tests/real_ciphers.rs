@@ -94,7 +94,7 @@ fn dc23_blind_with_word_model() {
     use cryptok_core::rkc::{pair_accuracy, solve_words, RkcOptions};
     use cryptok_core::words::WordModel;
     let Some(lm) = model() else { return };
-    let wm = WordModel::from_corpus(&root().join("corpus"), &[], 3).unwrap();
+    let wm = WordModel::from_corpus(&[root().join("corpus")], &[], 3).unwrap();
     let trie = wm.trie().with_oov(-4.0, -3.5);
     let c = scrub("BVFBHGHXAWJEKEDMDZAPRMWGNMTVIRPWIKHGIPUU");
     let key = scrub("WHOINTHEWORLDAMIAHTHATSTHEGREATPUZZLEAND");
