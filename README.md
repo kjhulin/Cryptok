@@ -1,6 +1,6 @@
 # Cryptok Code Cracker 2.0
 
-A rewrite of [CryptokCodeCracker](https://github.com/kjhulin/CryptokCodeCracker) in Rust, focused on fast and accurate running key cipher (RKC) solving, with a CLI and (coming) a local web UI.
+A rewrite of [CryptokCodeCracker](https://github.com/kjhulin/CryptokCodeCracker) in Rust, focused on fast and accurate running key cipher (RKC) solving, with a CLI and a local web UI.
 
 **Status:** early development. Working today: language model, running key solver (Viterbi), known-text key search, crib search, keyed-alphabet Vigenère (solves Kryptos K1/K2), CLI, and a browser UI.
 
