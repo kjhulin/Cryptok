@@ -113,6 +113,7 @@ pre.plain { white-space: pre-wrap; word-break: break-all; font: 14px/1.6 var(--m
     <button role="tab" aria-selected="true" data-tab="rkc">Running key</button>
     <button role="tab" aria-selected="false" data-tab="known">Known texts</button>
     <button role="tab" aria-selected="false" data-tab="vig">Vigenère</button>
+    <button role="tab" aria-selected="false" data-tab="trans">Transposition</button>
   </nav>
   <div id="status">Loading model…</div>
 </header>
@@ -213,6 +214,17 @@ pre.plain { white-space: pre-wrap; word-break: break-all; font: 14px/1.6 var(--m
         <p class="note">Each word is tried as the alphabet keyword. A few thousand words take about a minute; texts over 150 letters work best.</p>
       </div>
     </aside>
+  </section>
+  <!-- Transposition -->
+  <section class="panel" id="p-trans" role="tabpanel">
+    <div>
+      <div class="bar">
+        <button class="primary" id="trans-run">Solve transposition</button>
+        <span class="count" id="trans-time"></span>
+      </div>
+      <div id="trans-results"><p class="empty">Tries route transpositions (one or two steps, every width and direction, as in Kryptos K3) and keyed columnar transpositions up to 12 columns.</p></div>
+    </div>
+    <aside></aside>
   </section>
 </main>
 
@@ -488,6 +500,18 @@ $('#vig-run').addEventListener('click', () => {
         <span class="score">length ${r.period}, alphabet ${r.alphabet}, ${r.per_letter.toFixed(3)} per letter</span></header>
         <pre class="plain">${r.plain.replace(/[<&]/g, (c) => c === '<' ? '&lt;' : '&amp;')}</pre></div>`).join('');
     }).finally(() => { btn.disabled = false; });
+});
+
+// ---------- transposition
+$('#trans-run').addEventListener('click', () => {
+  const btn = $('#trans-run'); btn.disabled = true;
+  $('#trans-results').innerHTML = '<p class="empty">Solving…</p>';
+  fetch(`/api/transpose?text=${encodeURIComponent($('#cipher').value)}`).then((r) => r.json()).then((d) => {
+    $('#trans-time').textContent = `${d.secs.toFixed(2)} s`;
+    $('#trans-results').innerHTML = d.results.map((r, k) => `<div class="result"><header><strong>${k === 0 ? 'Best' : '#' + (k + 1)}</strong>
+      <span class="score">${r.method}, ${r.per_letter.toFixed(3)} per letter</span></header>
+      <pre class="plain">${r.text.replace(/[<&]/g, (c) => c === '<' ? '&lt;' : '&amp;')}</pre></div>`).join('') || '<p class="empty">Need at least 8 letters.</p>';
+  }).finally(() => { btn.disabled = false; });
 });
 
 let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { renderTape(); renderResults(); }, 150); });

@@ -254,6 +254,25 @@ fn handle(stream: TcpStream, st: &ServerState) -> std::io::Result<()> {
                 &format!("{{\"secs\":{:.2},\"results\":[{}]}}", t.elapsed().as_secs_f64(), items.join(",")),
             )
         }
+        "/api/transpose" => {
+            use cryptok_core::transpo;
+            let text = req.q("text");
+            let letters = scrub(&text).len();
+            if letters < 8 {
+                return respond(&stream, "200 OK", "application/json", "{\"secs\":0,\"results\":[]}");
+            }
+            let t = Instant::now();
+            let q = st.lm.dense(classic::climb_ngram_size(&st.lm, letters));
+            let mut all = transpo::solve_route(&st.lm, &q, &text, 60, 3);
+            all.extend(transpo::solve_columnar(&st.lm, &q, &text, 2, req.num("max_cols", 12), 8, 3));
+            all.sort_by(|x, y| y.per_letter.total_cmp(&x.per_letter));
+            let items: Vec<String> = all
+                .iter()
+                .take(5)
+                .map(|s| format!("{{\"method\":{},\"text\":{},\"per_letter\":{}}}", json_str(&s.describe()), json_str(&s.text), num(s.per_letter)))
+                .collect();
+            respond(&stream, "200 OK", "application/json", &format!("{{\"secs\":{:.2},\"results\":[{}]}}", t.elapsed().as_secs_f64(), items.join(",")))
+        }
         "!method" => respond(&stream, "405 Method Not Allowed", "text/plain", "GET only"),
         _ => respond(&stream, "404 Not Found", "text/plain", "not found"),
     }
