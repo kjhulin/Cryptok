@@ -87,6 +87,7 @@ h2 { font-size: 15px; margin: 24px 0 8px; }
 .result .score { font: 13px var(--mono); color: var(--muted); }
 .result .letters span { cursor: pointer; user-select: none; }
 .result .letters span.sel { background: var(--sel); }
+.result .letters span.wb { box-shadow: inset 2px 0 0 var(--muted); }
 .result.live { opacity: 0.8; }
 .empty { color: var(--muted); padding: 16px 0; }
 
@@ -133,8 +134,9 @@ pre.plain { white-space: pre-wrap; word-break: break-all; font: 14px/1.6 var(--m
         <label class="field" for="beam">Beam</label>
         <select id="beam">
           <option value="10000">10,000 (fast)</option>
+          <option value="20000" selected>20,000</option>
           <option value="50000">50,000</option>
-          <option value="100000" selected>100,000</option>
+          <option value="100000">100,000</option>
           <option value="500000">500,000 (slow)</option>
         </select>
         <div class="progress" aria-hidden="true"><i id="rkc-prog"></i></div>
@@ -352,8 +354,8 @@ function renderResults() {
     let lines = '';
     for (let s = 0; s < r.a.length; s += per) {
       const e = Math.min(r.a.length, s + per);
-      const span = (str, cls) => [...str.slice(s, e)].map((ch, j) => `<span data-i="${s + j}">${ch}</span>`).join('');
-      lines += `<div class="line"><div class="idx">${s + 1}</div><div class="rows letters"><div class="row a">${span(r.a)}</div><div class="row b">${span(r.b)}</div></div></div>`;
+      const span = (str, br) => [...str.slice(s, e)].map((ch, j) => `<span data-i="${s + j}"${br && br[s + j] === '1' ? ' class="wb"' : ''}>${ch}</span>`).join('');
+      lines += `<div class="line"><div class="idx">${s + 1}</div><div class="rows letters"><div class="row a">${span(r.a, r.ab)}</div><div class="row b">${span(r.b, r.bb)}</div></div></div>`;
     }
     return `<div class="result${live ? ' live' : ''}" data-k="${k}"><header><strong>${live ? 'Best so far' : '#' + (k + 1)}</strong>
       <span class="score">${r.per_letter.toFixed(3)} per letter</span>

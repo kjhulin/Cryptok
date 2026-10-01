@@ -1,5 +1,6 @@
 //! `cryptok` — command-line interface for Cryptok Code Cracker 2.0.
 
+use cryptok_core::words::WordModel;
 use cryptok_core::lm::LangModel;
 use cryptok_core::rkc::{self, RkcOptions, StepInfo};
 use cryptok_core::text::{enc, scrub, strip_gutenberg, unscrub};
@@ -191,12 +192,15 @@ fn cmd_rkc(a: &Args) -> Result<(), String> {
         return Err("no cipher letters given".into());
     }
     let lm = load_model(a)?;
+    let words = word_setup(a, "")?;
     let opts = RkcOptions {
-        beam: a.num("beam", 100_000)?,
+        beam: a.num("beam", if words.is_some() { 20_000 } else { 100_000 })?,
         results: a.num("results", 10)?,
         threads: a.num("threads", 0)?,
         key_hints: parse_hint(&a.get("key-hint", ""), cipher.len()),
         plain_hints: parse_hint(&a.get("plain-hint", ""), cipher.len()),
+        word_weight: words.as_ref().map_or(0.0, |w| w.weight),
+        ..Default::default()
     };
     let quiet = a.has("quiet");
     let t = Instant::now();
@@ -206,15 +210,23 @@ fn cmd_rkc(a: &Args) -> Result<(), String> {
             let _ = std::io::stderr().flush();
         }
     };
-    let sols = rkc::solve(&lm, &cipher, &opts, Some(&mut cb), None);
+    let sols = rkc::solve_words(&lm, words.as_ref().map(|w| &w.trie), &cipher, &opts, Some(&mut cb), None);
     if !quiet {
         eprintln!();
     }
     println!("solved {} letters, beam {} in {:.2}s", cipher.len(), opts.beam, t.elapsed().as_secs_f64());
     for (i, s) in sols.iter().enumerate() {
         println!("[{:>2}] {:8.3}/letter  total {:9.2}", i + 1, s.per_letter(), s.score);
-        println!("     A: {}", unscrub(&s.key));
-        println!("     B: {}", unscrub(&s.plain));
+        match &words {
+            Some(w) => {
+                println!("     A: {}", w.model.segment(&s.key).render(&s.key));
+                println!("     B: {}", w.model.segment(&s.plain).render(&s.plain));
+            }
+            None => {
+                println!("     A: {}", unscrub(&s.key));
+                println!("     B: {}", unscrub(&s.plain));
+            }
+        }
     }
     Ok(())
 }
@@ -281,7 +293,8 @@ fn cmd_serve(a: &Args) -> Result<(), String> {
     eprintln!("loaded {} known-text sources", sources.len());
     let quad = lm.dense(4.min(lm.order() + 1));
     let port = a.num("port", 8077)? as u16;
-    let state = serve::ServerState { lm, quad, sources, model_path: a.get("model", "cryptok.cklm") };
+    let words = word_setup(a, "")?.map(|w| (w.model, w.trie, w.weight));
+    let state = serve::ServerState { lm, quad, sources, model_path: a.get("model", "cryptok.cklm"), words };
     serve::run(state, port, !a.has("no-open"))
 }
 
@@ -431,13 +444,25 @@ fn read_cases(p: &Path) -> Result<Vec<(String, Vec<u8>, Vec<u8>, Vec<u8>)>, Stri
 fn cmd_bench_run(a: &Args) -> Result<(), String> {
     let lm = load_model(a)?;
     let cases = read_cases(&PathBuf::from(a.get("cases", "bench/cases.tsv")))?;
-    let opts = RkcOptions { beam: a.num("beam", 100_000)?, results: 1, threads: a.num("threads", 0)?, ..Default::default() };
+    let words = word_setup(a, "1342.txt,2701.txt,84.txt")?;
+    let opts = RkcOptions {
+        beam: a.num("beam", if words.is_some() { 20_000 } else { 100_000 })?,
+        results: 1,
+        threads: a.num("threads", 0)?,
+        word_weight: words.as_ref().map_or(0.0, |w| w.weight),
+        merge_len: a.num("merge-len", 0)?,
+        ..Default::default()
+    };
+    let trie = words.as_ref().map(|w| &w.trie);
+    if a.num("diag", 0)? > 0 {
+        return cmd_bench_diag(a, &lm, &cases);
+    }
     println!("{:>4} {:>5} {:>8} {:>8}", "id", "len", "acc%", "secs");
     let mut by_len: Vec<(usize, Vec<(f64, f64)>)> = vec![];
     let total = Instant::now();
     for (id, c, k, p) in &cases {
         let t = Instant::now();
-        let s = rkc::solve(&lm, c, &opts, None, None);
+        let s = rkc::solve_words(&lm, trie, c, &opts, None, None);
         let secs = t.elapsed().as_secs_f64();
         let acc = s.first().map(|s| rkc::pair_accuracy(s, k, p)).unwrap_or(0.0);
         println!("{:>4} {:>5} {:>8.1} {:>8.2}", id, c.len(), acc * 100.0, secs);
@@ -467,4 +492,58 @@ fn cmd_bench_run(a: &Args) -> Result<(), String> {
         return Err(format!("accuracy regression: {overall:.1}% < required {min:.1}%"));
     }
     Ok(())
+}
+
+/// Diagnostic: does the truth outscore the solver's answer under the char / word models?
+fn cmd_bench_diag(a: &Args, lm: &LangModel, cases: &[(String, Vec<u8>, Vec<u8>, Vec<u8>)]) -> Result<(), String> {
+    let corpus = PathBuf::from(a.get("corpus", "corpus"));
+    let excl: Vec<String> = a.get("word-exclude", "1342.txt,2701.txt,84.txt").split(',').filter(|s| !s.is_empty()).map(String::from).collect();
+    let wm = WordModel::from_corpus(&corpus, &excl, a.num("min-count", 3)? as u32).map_err(|e| e.to_string())?;
+    let opts = RkcOptions { beam: a.num("beam", 10_000)?, results: 1, threads: a.num("threads", 0)?, ..Default::default() };
+    println!("{:>4} {:>5} {:>6} {:>9} {:>9} {:>9}", "id", "len", "acc%", "d_char", "d_word", "d_all(w=1)");
+    let (mut cwin, mut wwin, mut awin, mut n) = (0, 0, 0, 0);
+    for (id, c, k, p) in cases {
+        let Some(sol) = rkc::solve(lm, c, &opts, None, None).into_iter().next() else { continue };
+        let ch = |k: &[u8], p: &[u8]| lm.score(k) + lm.score(p);
+        let wd = |k: &[u8], p: &[u8]| wm.segment(k).score + wm.segment(p).score;
+        let d_char = ch(k, p) - ch(&sol.key, &sol.plain);
+        let d_word = wd(k, p) - wd(&sol.key, &sol.plain);
+        println!("{:>4} {:>5} {:>6.1} {:>9.1} {:>9.1} {:>9.1}", id, c.len(), rkc::pair_accuracy(&sol, k, p) * 100.0, d_char, d_word, d_char + d_word);
+        n += 1;
+        cwin += (d_char > 0.0) as usize;
+        wwin += (d_word > 0.0) as usize;
+        awin += (d_char + d_word > 0.0) as usize;
+    }
+    println!("truth scores higher than solver output: char {cwin}/{n}, word {wwin}/{n}, combined {awin}/{n}");
+    Ok(())
+}
+
+/// Word model + trie for word-aware solving. Weight 0 (or a missing corpus) disables it.
+struct Words {
+    model: WordModel,
+    trie: cryptok_core::words::WordTrie,
+    weight: f32,
+}
+
+fn num_f32(a: &Args, k: &str, d: &str) -> Result<f32, String> {
+    a.get(k, d).parse().map_err(|_| format!("--{k} expects a number"))
+}
+
+/// `default_exclude` lists corpus files left out of the word model (the benchmark holds books out).
+fn word_setup(a: &Args, default_exclude: &str) -> Result<Option<Words>, String> {
+    let weight = num_f32(a, "word-weight", "0.3")?;
+    if weight <= 0.0 {
+        return Ok(None);
+    }
+    let corpus = PathBuf::from(a.get("corpus", "corpus"));
+    if !corpus.is_dir() {
+        eprintln!("note: corpus directory {} not found, solving without the word model", corpus.display());
+        return Ok(None);
+    }
+    let excl: Vec<String> = a.get("word-exclude", default_exclude).split(',').filter(|s| !s.is_empty()).map(String::from).collect();
+    let t = Instant::now();
+    let model = WordModel::from_corpus(&corpus, &excl, a.num("min-count", 3)? as u32).map_err(|e| e.to_string())?;
+    let trie = model.trie().with_oov(num_f32(a, "oov-base", "-4")?, num_f32(a, "oov-per", "-3.5")?);
+    eprintln!("word model: {} words in {:.2}s (weight {weight})", model.vocab_size(), t.elapsed().as_secs_f64());
+    Ok(Some(Words { model, trie, weight }))
 }

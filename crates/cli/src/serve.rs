@@ -22,6 +22,8 @@ pub struct ServerState {
     pub quad: DenseNgram,
     pub sources: Vec<Source>,
     pub model_path: String,
+    /// Word model, its trie and the word-score weight (None = character model only).
+    pub words: Option<(cryptok_core::words::WordModel, cryptok_core::words::WordTrie, f32)>,
 }
 
 pub fn run(state: ServerState, port: u16, open: bool) -> Result<(), String> {
@@ -299,10 +301,23 @@ fn parse_hint(h: &str, n: usize) -> Vec<Option<u8>> {
     v
 }
 
-fn sols_json(s: &[RkcSolution]) -> String {
+/// `1` for every letter that starts a word in the best segmentation, `0` otherwise.
+fn breaks(wm: &cryptok_core::words::WordModel, letters: &[u8]) -> String {
+    let mut out = String::with_capacity(letters.len());
+    for l in wm.segment(letters).lengths {
+        out.push('1');
+        out.extend(std::iter::repeat('0').take(l - 1));
+    }
+    out
+}
+
+fn sols_json(s: &[RkcSolution], words: Option<&cryptok_core::words::WordModel>) -> String {
     let items: Vec<String> = s
         .iter()
-        .map(|x| format!("{{\"a\":{},\"b\":{},\"per_letter\":{}}}", json_str(&unscrub(&x.key)), json_str(&unscrub(&x.plain)), num(x.per_letter())))
+        .map(|x| {
+            let wb = words.map_or(String::new(), |w| format!(",\"ab\":{},\"bb\":{}", json_str(&breaks(w, &x.key)), json_str(&breaks(w, &x.plain))));
+            format!("{{\"a\":{},\"b\":{},\"per_letter\":{}{}}}", json_str(&unscrub(&x.key)), json_str(&unscrub(&x.plain)), num(x.per_letter()), wb)
+        })
         .collect();
     format!("[{}]", items.join(","))
 }
@@ -315,22 +330,25 @@ fn api_rkc(stream: TcpStream, st: &ServerState, req: &Request) -> std::io::Resul
         return Ok(());
     }
     let opts = RkcOptions {
-        beam: req.num("beam", 100_000).clamp(1, 2_000_000),
+        beam: req.num("beam", 20_000).clamp(1, 2_000_000),
         results: req.num("results", 12).clamp(1, 100),
         key_hints: parse_hint(&req.q("key"), cipher.len()),
         plain_hints: parse_hint(&req.q("plain"), cipher.len()),
         threads: 0,
+        word_weight: st.words.as_ref().map_or(0.0, |w| w.2),
+        ..Default::default()
     };
+    let wm = st.words.as_ref().map(|w| &w.0);
     let t = Instant::now();
     let mut last = Instant::now();
     let mut cb = |s: &StepInfo| {
         if last.elapsed().as_millis() >= 120 || s.step == s.total {
             last = Instant::now();
-            sse.send("progress", &format!("{{\"step\":{},\"total\":{},\"best\":{}}}", s.step, s.total, sols_json(s.best)));
+            sse.send("progress", &format!("{{\"step\":{},\"total\":{},\"best\":{}}}", s.step, s.total, sols_json(s.best, wm)));
         }
     };
-    let sols = rkc::solve(&st.lm, &cipher, &opts, Some(&mut cb), Some(&sse.gone));
-    sse.send("done", &format!("{{\"secs\":{:.2},\"results\":{}}}", t.elapsed().as_secs_f64(), sols_json(&sols)));
+    let sols = rkc::solve_words(&st.lm, st.words.as_ref().map(|w| &w.1), &cipher, &opts, Some(&mut cb), Some(&sse.gone));
+    sse.send("done", &format!("{{\"secs\":{:.2},\"results\":{}}}", t.elapsed().as_secs_f64(), sols_json(&sols, wm)));
     Ok(())
 }
 
