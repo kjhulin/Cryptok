@@ -10,5 +10,6 @@ pub mod lm;
 pub mod map;
 pub mod rkc;
 pub mod text;
+pub mod transpo;
 
 pub use lm::LangModel;

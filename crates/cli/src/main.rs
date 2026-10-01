@@ -22,6 +22,8 @@ USAGE:
   cryptok rkc    [--model FILE] [--beam N] [--results N] [--threads N]
                  [--key-hint HINT] [--plain-hint HINT] [--quiet] CIPHER...
   cryptok crib   [--model FILE] [--results N] --word WORD CIPHER...
+  cryptok transpose [--model FILE] [--max-width N] [--max-cols N] [--results N] TEXT...
+                 (route transpositions, one or two steps, and keyed columnar)
   cryptok known  [--model FILE] [--sources DIR_OR_FILE,...] [--window N] [--results N] CIPHER...
                  (slide known texts along the cipher as candidate running keys)
   cryptok vigenere [--model FILE] [--alphabet KW1,KW2,...] [--max-period N] [--restarts N]
@@ -92,6 +94,7 @@ fn main() -> ExitCode {
         "rkc" => parse(&argv[1..]).and_then(|a| cmd_rkc(&a)),
         "serve" => parse(&argv[1..]).and_then(|a| cmd_serve(&a)),
         "crib" => parse(&argv[1..]).and_then(|a| cmd_crib(&a)),
+        "transpose" | "trans" => parse(&argv[1..]).and_then(|a| cmd_transpose(&a)),
         "known" => parse(&argv[1..]).and_then(|a| cmd_known(&a)),
         "vigenere" | "vig" => parse(&argv[1..]).and_then(|a| cmd_vigenere(&a)),
         "bench" => match argv.get(1).map(String::as_str) {
@@ -249,6 +252,30 @@ fn cmd_crib(a: &Args) -> Result<(), String> {
     let lm = load_model(a)?;
     for h in rkc::crib_search(&lm, &cipher, &word).iter().take(a.num("results", 15)?) {
         println!("{:>4}  {:7.3}/letter  {}", h.pos, h.score, unscrub(&h.other));
+    }
+    Ok(())
+}
+
+fn cmd_transpose(a: &Args) -> Result<(), String> {
+    use cryptok_core::transpo;
+    let text = a.pos.join("");
+    let letters = scrub(&text).len();
+    if letters < 8 {
+        return Err("need at least 8 letters".into());
+    }
+    let lm = load_model(a)?;
+    let q = lm.dense(cryptok_core::classic::climb_ngram_size(&lm, letters));
+    let results = a.num("results", 3)?;
+    let t = Instant::now();
+    let mut all = transpo::solve_route(&lm, &q, &text, a.num("max-width", 60)?, results);
+    eprintln!("route search {:.2}s", t.elapsed().as_secs_f64());
+    let t = Instant::now();
+    all.extend(transpo::solve_columnar(&lm, &q, &text, 2, a.num("max-cols", 12)?, a.num("restarts", 8)?, results));
+    eprintln!("columnar search {:.2}s", t.elapsed().as_secs_f64());
+    all.sort_by(|x, y| y.per_letter.total_cmp(&x.per_letter));
+    for (i, s) in all.iter().take(results).enumerate() {
+        println!("[{}] {:.3}/letter  {}", i + 1, s.per_letter, s.describe());
+        println!("    {}", s.text);
     }
     Ok(())
 }
