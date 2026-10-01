@@ -82,6 +82,10 @@ pub fn vigenere_encrypt(plain: &[u8], key: &[u8], a: &Alphabet) -> Vec<u8> {
 }
 
 const POLISH: usize = 3;
+/// Below this many letters, likely periods also get simulated annealing.
+const SHORT_TEXT: usize = 120;
+const ANNEAL_RUNS: usize = 8;
+const ANNEAL_ITERS: usize = 50_000;
 
 /// N-gram size for hill climbing: short texts need 5-grams to separate English from
 /// junk; long texts are well served by cache-friendly quadgrams.
@@ -202,6 +206,107 @@ fn polish(lm: &LangModel, cipher: &[u8], a: &Alphabet, mut shifts: Vec<u8>) -> (
     }
 }
 
+/// Simulated annealing on the column shifts with the full model (short texts).
+pub fn anneal(lm: &LangModel, cipher: &[u8], a: &Alphabet, period: usize, iters: usize, seed: u64) -> (Vec<u8>, f32) {
+    let mut rng = Rng(seed | 1);
+    let mut shifts: Vec<u8> = (0..period).map(|_| (rng.next() % 26) as u8).collect();
+    let mut buf = vigenere_decrypt(cipher, &shifts, a);
+    let mut cur = lm.score(&buf);
+    let mut best = (shifts.clone(), cur);
+    let set_col = |buf: &mut [u8], col: usize, s: u8| {
+        for i in (col..cipher.len()).step_by(period) {
+            buf[i] = a.letters[((a.index[cipher[i] as usize] + 26 - s) % 26) as usize];
+        }
+    };
+    let (t0, t1) = (4.0f32, 0.2f32);
+    for it in 0..iters {
+        let temp = t0 * (t1 / t0).powf(it as f32 / iters as f32);
+        let col = (rng.next() % period as u64) as usize;
+        let old = shifts[col];
+        let s = ((old as u64 + 1 + rng.next() % 25) % 26) as u8;
+        set_col(&mut buf, col, s);
+        let sc = lm.score(&buf);
+        let accept = sc >= cur || ((sc - cur) / temp).exp() > (rng.next() % 1_000_000) as f32 / 1e6;
+        if accept {
+            shifts[col] = s;
+            cur = sc;
+            if cur > best.1 {
+                best = (shifts.clone(), cur);
+            }
+        } else {
+            set_col(&mut buf, col, old);
+        }
+    }
+    polish(lm, cipher, a, best.0)
+}
+
+/// Column shifts that exactly maximise the bigram log-probability of the decryption.
+/// Adjacent letters fall in adjacent columns (wrapping to column 0 on the next row), so
+/// the objective is a cycle of pairwise terms: fix column 0's shift, then dynamic
+/// programming around the cycle. A far better starting point than per-column unigram
+/// fits when columns hold only a few letters.
+fn bigram_init(q2: &DenseNgram, cipher: &[u8], a: &Alphabet, p: usize) -> Vec<u8> {
+    let n = cipher.len();
+    let dec = |c: u8, s: u8| a.letters[((a.index[c as usize] + 26 - s) % 26) as usize] as usize;
+    // pair[col][s][t]: bigram score of letters in `col` (shift s) followed by col+1 (shift t).
+    let mut pair = vec![[[0f32; 26]; 26]; p];
+    for j in 0..n.saturating_sub(1) {
+        let col = j % p;
+        for s in 0..26u8 {
+            let x = dec(cipher[j], s);
+            for t in 0..26u8 {
+                let y = dec(cipher[j + 1], t);
+                pair[col][s as usize][t as usize] += q2.value(x * 26 + y);
+            }
+        }
+    }
+    if p == 1 {
+        let s = (0..26).max_by(|&x, &y| pair[0][x][x].total_cmp(&pair[0][y][y])).unwrap();
+        return vec![s as u8];
+    }
+    let mut best = (f32::NEG_INFINITY, vec![0u8; p]);
+    for s0 in 0..26usize {
+        // dp[t] = best score with column `col`'s shift = t; back[col][t] = previous shift.
+        let mut dp = [f32::NEG_INFINITY; 26];
+        let mut back = vec![[0u8; 26]; p];
+        for t in 0..26 {
+            dp[t] = pair[0][s0][t];
+        }
+        for col in 1..p - 1 {
+            let mut nd = [f32::NEG_INFINITY; 26];
+            for t in 0..26 {
+                for s in 0..26 {
+                    let v = dp[s] + pair[col][s][t];
+                    if v > nd[t] {
+                        nd[t] = v;
+                        back[col + 1][t] = s as u8;
+                    }
+                }
+            }
+            dp = nd;
+        }
+        // Close the cycle: last column back to column 0 (shift s0).
+        let (mut bt, mut bv) = (0usize, f32::NEG_INFINITY);
+        for t in 0..26 {
+            let v = dp[t] + pair[p - 1][t][s0];
+            if v > bv {
+                bv = v;
+                bt = t;
+            }
+        }
+        if bv > best.0 {
+            let mut sh = vec![0u8; p];
+            sh[0] = s0 as u8;
+            sh[p - 1] = bt as u8;
+            for col in (2..p).rev() {
+                sh[col - 1] = back[col][sh[col] as usize];
+            }
+            best = (bv, sh);
+        }
+    }
+    best.1
+}
+
 /// Solve a periodic Vigenère cipher over the given alphabet, trying every period
 /// up to `max_period`. Hill climbing uses a fast quadgram table with random restarts;
 /// candidates are then rescored with the full language model and compared with a
@@ -221,6 +326,12 @@ pub fn solve_vigenere_with(lm: &LangModel, q: &DenseNgram, cipher: &[u8], a: &Al
     let uni = lm.row(0, 0);
     let deq = lm.deq();
     let pen = (26f32).ln();
+    let q2 = lm.dense(2);
+    let ic_top: Vec<usize> = {
+        let mut ic = period_ic(cipher, max_period);
+        ic.sort_by(|a, b| b.1.total_cmp(&a.1));
+        ic.into_iter().take(3).map(|x| x.0).collect()
+    };
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
     let mut out: Vec<VigenereSolution> = Vec::new();
     for period in 1..=max_period.min(n) {
@@ -238,8 +349,9 @@ pub fn solve_vigenere_with(lm: &LangModel, q: &DenseNgram, cipher: &[u8], a: &Al
                 (0..26u8).max_by(|&x, &y| f(x).total_cmp(&f(y))).unwrap()
             })
             .collect();
-        // Fast quadgram climbs from the unigram start and random restarts...
-        let mut cands = vec![climb(q, cipher, a, init)];
+        // Fast n-gram climbs from the unigram start, the exact bigram-chain optimum,
+        // and random restarts...
+        let mut cands = vec![climb(q, cipher, a, init), climb(q, cipher, a, bigram_init(&q2, cipher, a, period))];
         for _ in 0..restarts {
             let start: Vec<u8> = (0..period).map(|_| (rng.next() % 26) as u8).collect();
             cands.push(climb(q, cipher, a, start));
@@ -252,6 +364,21 @@ pub fn solve_vigenere_with(lm: &LangModel, q: &DenseNgram, cipher: &[u8], a: &Al
             let r = polish(lm, cipher, a, c.0);
             if r.1 > best.1 {
                 best = r;
+            }
+        }
+        // Very short texts: hill climbing gets trapped, so the most likely periods (by
+        // index of coincidence) also get several simulated-annealing runs.
+        if n < SHORT_TEXT && ic_top.contains(&period) {
+            let runs: Vec<(Vec<u8>, f32)> = std::thread::scope(|sc| {
+                let hs: Vec<_> = (0..ANNEAL_RUNS)
+                    .map(|run| sc.spawn(move || anneal(lm, cipher, a, period, ANNEAL_ITERS, 0x5DEE_CE66_D ^ ((period as u64) << 32) ^ run as u64)))
+                    .collect();
+                hs.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            for r in runs {
+                if r.1 > best.1 {
+                    best = r;
+                }
             }
         }
         let plain = vigenere_decrypt(cipher, &best.0, a);
