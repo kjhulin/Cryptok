@@ -17,6 +17,9 @@ use std::collections::BinaryHeap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+/// Ring buffer size for the screening window (window length is capped at RING + n - 1).
+const RING: usize = 64;
+
 pub struct Source {
     pub name: String,
     pub letters: Vec<u8>,
@@ -148,6 +151,33 @@ pub fn search(
             a = b;
         }
     }
+    // Fast screening tables:
+    //  * `packed`: n-gram costs (-log-prob in 0.1-nat steps, u8 so the table fits in L2), indexed with 5 bits per letter so the
+    //    rolling index is a shift-and-mask (no multiply/modulo in the hot loop);
+    //  * `sub[j]`: per cipher position, plaintext letter for every source letter.
+    assert!(qn <= 4, "screening table supports n-grams up to 4");
+    let bits = 5 * qn;
+    let mask = (1usize << bits) - 1;
+    let mut packed = vec![255u8; 1 << bits];
+    for idx26 in 0..26usize.pow(qn as u32) {
+        let (mut x, mut idx32) = (idx26, 0usize);
+        for k in 0..qn {
+            idx32 |= (x % 26) << (5 * k);
+            x /= 26;
+        }
+        packed[idx32] = (-quad.value(idx26) * 10.0).round().clamp(0.0, 255.0) as u8;
+    }
+    let sub: Vec<[u8; 32]> = cipher
+        .iter()
+        .map(|&c| {
+            let mut r = [0u8; 32];
+            for (k, x) in r.iter_mut().enumerate().take(26) {
+                *x = dec(c, k as u8);
+            }
+            r
+        })
+        .collect();
+    let span = (w - (qn - 1)).min(RING);
     let next = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
     let keep = opts.rescore.max(opts.results);
@@ -157,8 +187,6 @@ pub fn search(
             .map(|_| {
                 sc.spawn(|| {
                     let mut heap: BinaryHeap<Cand> = BinaryHeap::with_capacity(keep + 1);
-                    let mut ws = vec![0f32; n];
-                    let mut plain = vec![0u8; n];
                     loop {
                         if cancel.map_or(false, |c| c.load(Ordering::Relaxed)) {
                             break;
@@ -176,24 +204,31 @@ pub fn search(
                             if end < start + w {
                                 continue;
                             }
-                            for j in start..end {
-                                plain[j] = dec(cipher[j], src[(a + j as i64) as usize]);
-                            }
-                            // Quadgram score for each window end, then best sliding window.
-                            for j in start + qn - 1..end {
-                                ws[j] = quad.window(&plain, j);
-                            }
-                            let first = start + qn - 1;
-                            let span = w - (qn - 1);
-                            let mut sum: f32 = ws[first..first + span].iter().sum();
-                            let mut best = sum;
-                            for j in first + span..end {
-                                sum += ws[j] - ws[j - span];
-                                if sum > best {
+                            // One fused pass: plaintext letter, rolling n-gram index,
+                            // sliding window sum (ring buffer) and running best.
+                            let mut idx = 0usize;
+                            let mut ring = [0u32; RING];
+                            let (mut sum, mut best, mut cnt) = (0u32, u32::MAX, 0usize);
+                            let sbase = (a + start as i64) as usize;
+                            for (k, j) in (start..end).enumerate() {
+                                let p = unsafe { *sub.get_unchecked(j).get_unchecked(*src.get_unchecked(sbase + k) as usize) } as usize;
+                                idx = ((idx << 5) | p) & mask;
+                                if k + 1 < qn {
+                                    continue;
+                                }
+                                let v = unsafe { *packed.get_unchecked(idx) } as u32;
+                                let slot = cnt % RING;
+                                if cnt >= span {
+                                    sum -= ring[(cnt - span) % RING];
+                                }
+                                ring[slot] = v;
+                                sum += v;
+                                cnt += 1;
+                                if cnt >= span && sum < best {
                                     best = sum;
                                 }
                             }
-                            let score = best / span as f32;
+                            let score = -(best as f32) / (10.0 * span as f32);
                             if heap.len() < keep {
                                 heap.push(Cand { score, source: si as u32, offset: a });
                             } else if score > heap.peek().unwrap().score {

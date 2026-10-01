@@ -18,6 +18,8 @@ USAGE:
   cryptok serve  [--model FILE] [--sources DIR_OR_FILE,...] [--port 8077] [--no-open]
                  (web UI in your browser)
   cryptok train  [--corpus DIR] [--order N] [--out FILE] [--exclude a.txt,b.txt]
+  cryptok eval   [--model FILE] [--corpus DIR] --files a.txt,b.txt
+                 (held-out cross-entropy in bits per letter; lower is better)
   cryptok score  [--model FILE] TEXT...
   cryptok rkc    [--model FILE] [--beam N] [--results N] [--threads N]
                  [--key-hint HINT] [--plain-hint HINT] [--quiet] CIPHER...
@@ -26,8 +28,9 @@ USAGE:
                  (route transpositions, one or two steps, and keyed columnar)
   cryptok known  [--model FILE] [--sources DIR_OR_FILE,...] [--window N] [--results N] CIPHER...
                  (slide known texts along the cipher as candidate running keys)
-  cryptok vigenere [--model FILE] [--alphabet KW1,KW2,...] [--max-period N] [--restarts N]
-                 [--results N] TEXT...
+  cryptok vigenere [--model FILE] [--alphabet KW1,KW2,...] [--alphabet-file FILE]
+                 [--max-period N] [--restarts N] [--results N] TEXT...
+                 (--alphabet-file: one candidate alphabet keyword per line; each is tried)
   cryptok bench gen [--corpus DIR] --holdout a.txt,b.txt [--out FILE] [--seed N] [--per-length N]
   cryptok bench run [--model FILE] [--cases FILE] [--beam N] [--threads N]
 
@@ -90,6 +93,7 @@ fn main() -> ExitCode {
     }
     let res = match argv[0].as_str() {
         "train" => parse(&argv[1..]).and_then(|a| cmd_train(&a)),
+        "eval" => parse(&argv[1..]).and_then(|a| cmd_eval(&a)),
         "score" => parse(&argv[1..]).and_then(|a| cmd_score(&a)),
         "rkc" => parse(&argv[1..]).and_then(|a| cmd_rkc(&a)),
         "serve" => parse(&argv[1..]).and_then(|a| cmd_serve(&a)),
@@ -135,6 +139,27 @@ fn cmd_train(a: &Args) -> Result<(), String> {
     println!("contexts per level: {:?}", st.contexts_per_level);
     println!("discounts: {:?}", st.discounts.iter().map(|d| (d * 1000.0).round() / 1000.0).collect::<Vec<_>>());
     println!("wrote {} ({:.1} MB)", out.display(), size as f64 / 1e6);
+    Ok(())
+}
+
+fn cmd_eval(a: &Args) -> Result<(), String> {
+    let lm = load_model(a)?;
+    let corpus = PathBuf::from(a.get("corpus", "corpus"));
+    let mut total = 0f64;
+    let mut letters = 0usize;
+    for f in a.get("files", "").split(',').filter(|s| !s.is_empty()) {
+        let b = std::fs::read(corpus.join(f)).map_err(|e| format!("{f}: {e}"))?;
+        let l = scrub(strip_gutenberg(&String::from_utf8_lossy(&b)));
+        // Score in 1,000-letter chunks (the model starts each chunk without context).
+        for ch in l.chunks(1000) {
+            total += lm.score(ch) as f64;
+            letters += ch.len();
+        }
+    }
+    if letters == 0 {
+        return Err("no letters to evaluate (use --files)".into());
+    }
+    println!("{letters} letters, {:.4} bits/letter", -total / letters as f64 / std::f64::consts::LN_2);
     Ok(())
 }
 
@@ -221,9 +246,26 @@ fn cmd_vigenere(a: &Args) -> Result<(), String> {
         let alpha = cryptok_core::classic::Alphabet::from_keyword(kw);
         all.extend(cryptok_core::classic::solve_vigenere_with(&lm, &q, &cipher, &alpha, max_period, restarts).into_iter().take(results));
     }
+    if let Some(f) = a.flags.get("alphabet-file") {
+        let words: Vec<String> = std::fs::read_to_string(f)
+            .map_err(|e| format!("{f}: {e}"))?
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty() && l.chars().all(|c| c.is_ascii_alphabetic()))
+            .collect();
+        let t2 = Instant::now();
+        let (ranked, sols) = cryptok_core::classic::solve_vigenere_keyword_search(&lm, &cipher, &words, max_period, 5);
+        eprintln!(
+            "ranked {} keywords in {:.1}s; best alphabets: {}",
+            words.len(),
+            t2.elapsed().as_secs_f64(),
+            ranked.iter().map(|h| h.keyword.as_str()).collect::<Vec<_>>().join(", ")
+        );
+        all.extend(sols);
+    }
     let pen = 26f32.ln();
     all.sort_by(|x, y| (y.score - y.period as f32 * pen).total_cmp(&(x.score - x.period as f32 * pen)));
-    println!("searched periods 1..={max_period} over {} alphabet(s) in {:.2}s", alphabets.len(), t.elapsed().as_secs_f64());
+    println!("searched periods 1..={max_period} in {:.2}s", t.elapsed().as_secs_f64());
     for (i, s) in all.iter().take(results).enumerate() {
         println!("[{}] period {:>2}  key {:<20} alphabet {}  {:.3}/letter", i + 1, s.period, unscrub(&s.key), s.alphabet, s.per_letter());
         println!("    {}", relayout(&original, &s.plain).replace('\n', "\n    "));
@@ -416,6 +458,13 @@ fn cmd_bench_run(a: &Args) -> Result<(), String> {
             v.iter().map(|x| x.1).sum::<f64>() / n
         );
     }
+    let all: Vec<f64> = by_len.iter().flat_map(|(_, v)| v.iter().map(|x| x.0)).collect();
+    let overall = all.iter().sum::<f64>() / all.len().max(1) as f64 * 100.0;
+    println!("overall mean acc {overall:.1}%");
     println!("total {:.1}s", total.elapsed().as_secs_f64());
+    let min = a.num("min-acc", 0)? as f64;
+    if overall < min {
+        return Err(format!("accuracy regression: {overall:.1}% < required {min:.1}%"));
+    }
     Ok(())
 }

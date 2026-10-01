@@ -178,16 +178,22 @@ impl LangModel {
         let mut contexts_per_level = Vec::with_capacity(k + 1);
         for l in 0..=k {
             let counts = &cnt[l];
-            let (mut n1, mut n2) = (0u64, 0u64);
+            // Modified Kneser–Ney (Chen & Goodman): separate discounts for counts 1, 2, 3+.
+            let mut nn = [0u64; 5];
             for &c in counts.values() {
-                if c == 1 {
-                    n1 += 1;
-                } else if c == 2 {
-                    n2 += 1;
+                if (1..=4).contains(&c) {
+                    nn[c as usize] += 1;
                 }
             }
-            let d = if n1 + n2 == 0 { 0.5 } else { (n1 as f64 / (n1 as f64 + 2.0 * n2 as f64)).clamp(0.1, 0.95) };
-            discounts.push(d);
+            let dk: [f64; 4] = if nn[1] == 0 || nn[2] == 0 || nn[3] == 0 || nn[4] == 0 {
+                [0.0, 0.5, 0.5, 0.5]
+            } else {
+                let (n1, n2, n3, n4) = (nn[1] as f64, nn[2] as f64, nn[3] as f64, nn[4] as f64);
+                let y = n1 / (n1 + 2.0 * n2);
+                [0.0, (1.0 - 2.0 * y * n2 / n1).clamp(0.05, 0.95), (2.0 - 3.0 * y * n3 / n2).clamp(0.05, 1.95), (3.0 - 4.0 * y * n4 / n3).clamp(0.05, 2.95)]
+            };
+            let disc = |c: u32| -> f64 { dk[(c as usize).min(3)] };
+            discounts.push(dk[1]);
 
             // Gather counts per context.
             let mut map = U64Map::with_capacity(counts.len() / 4 + 1);
@@ -241,10 +247,11 @@ impl LangModel {
                         ll -= 1;
                     }
                 };
-                let gamma = d * t / s;
+                let _ = t;
+                let gamma: f64 = row.iter().filter(|&&c| c > 0).map(|&c| disc(c)).sum::<f64>() / s;
                 for w in 0..ALPHABET {
                     let c = row[w] as f64;
-                    let p = ((c - d).max(0.0) / s) + gamma * lower[w] as f64;
+                    let p = ((c - if row[w] > 0 { disc(row[w]) } else { 0.0 }).max(0.0) / s) + gamma * lower[w] as f64;
                     probs[i * ALPHABET + w] = p as f32;
                 }
             }
@@ -369,6 +376,12 @@ impl DenseNgram {
             idx = idx * 26 + c as usize;
         }
         unsafe { *self.t.get_unchecked(idx) }
+    }
+
+    /// Value at a base-26 packed index (first letter most significant).
+    #[inline]
+    pub fn value(&self, idx: usize) -> f32 {
+        self.t[idx]
     }
 
     /// Sum over all complete n-gram windows.
