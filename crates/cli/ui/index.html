@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cryptok Code Cracker</title>
+<style>
+:root {
+  --film: #e8edef;
+  --sheet: #f7f9fa;
+  --ink: #1c2b36;
+  --muted: #5e6e7a;
+  --rule: #c5d0d6;
+  --a: #2b5ba8;
+  --b: #8c2f39;
+  --pin: #f3d57a;
+  --pin-edge: #c99a2e;
+  --sel: #cfe0f7;
+  --ok: #2f7d6b;
+  --cell: 22px;
+  --mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --film: #11181d; --sheet: #182229; --ink: #dce5ea; --muted: #8a9aa6; --rule: #2c3a44;
+    --a: #86a9e8; --b: #e88f99; --pin: #5c4a17; --pin-edge: #c99a2e; --sel: #233a5a; --ok: #6cc2ab;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--film); color: var(--ink); font: 15px/1.5 var(--sans); }
+button, input, select, textarea { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--a); outline-offset: 2px; }
+
+header { display: flex; align-items: baseline; gap: 28px; padding: 14px 24px 0; flex-wrap: wrap; }
+header h1 { margin: 0; font: 600 18px/1 var(--mono); letter-spacing: 0.02em; }
+header h1 span { color: var(--muted); font-weight: 400; }
+nav { display: flex; gap: 4px; }
+nav button { background: none; border: 0; border-bottom: 2px solid transparent; padding: 6px 10px 10px; cursor: pointer; color: var(--muted); }
+nav button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); }
+#status { margin-left: auto; color: var(--muted); font-size: 13px; }
+
+main { padding: 16px 24px 48px; max-width: 1280px; }
+.cipher-box { display: grid; gap: 6px; }
+label.field { font-size: 13px; color: var(--muted); }
+textarea#cipher { width: 100%; min-height: 64px; resize: vertical; background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px;
+  padding: 10px 12px; font: 16px/1.5 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; }
+.count { font: 12px var(--mono); color: var(--muted); }
+
+.panel { display: none; margin-top: 18px; }
+.panel.on { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 24px; }
+@media (max-width: 860px) { .panel.on { grid-template-columns: 1fr; } }
+
+.bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+.primary { background: var(--ink); color: var(--sheet); border: 0; border-radius: 4px; padding: 7px 16px; cursor: pointer; font-weight: 600; }
+.primary.stop { background: var(--b); }
+.quiet { background: none; border: 1px solid var(--rule); border-radius: 4px; padding: 6px 12px; cursor: pointer; }
+.quiet:disabled { opacity: 0.45; cursor: default; }
+select, input[type=text], input[type=number] { background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; padding: 6px 8px; }
+.progress { flex: 1; min-width: 140px; height: 4px; background: var(--rule); border-radius: 2px; overflow: hidden; }
+.progress i { display: block; height: 100%; width: 0; background: var(--ink); transition: width 0.1s linear; }
+.note { color: var(--muted); font-size: 13px; margin: 4px 0 0; max-width: 72ch; }
+
+/* The tape: cipher letters with the two streams beneath, wrapped into worksheet lines. */
+.tape { background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; padding: 10px 12px 4px; }
+.line { display: grid; grid-template-columns: 34px auto; margin-bottom: 10px; }
+.line .idx { font: 11px var(--mono); color: var(--muted); padding-top: 3px; }
+.rows { display: grid; gap: 1px; }
+.row { display: flex; }
+.row > * { width: var(--cell); flex: 0 0 var(--cell); text-align: center; font: 15px/22px var(--mono); height: 22px; }
+.row.c > span { color: var(--muted); }
+.row.c > span:nth-child(5n) { box-shadow: inset -1px 0 0 var(--rule); }
+.row input { border: 0; padding: 0; background: transparent; text-transform: uppercase; caret-color: var(--ink); border-bottom: 1px dotted var(--rule); }
+.row.a input, .row.a span { color: var(--a); }
+.row.b input, .row.b span { color: var(--b); }
+.row input.derived { opacity: 0.55; }
+.row .pinned { background: var(--pin); box-shadow: inset 0 -2px 0 var(--pin-edge); }
+.legend { display: flex; gap: 16px; font-size: 13px; color: var(--muted); margin: 8px 0 0; flex-wrap: wrap; }
+.legend b { font: 600 13px var(--mono); }
+.legend .ka { color: var(--a); } .legend .kb { color: var(--b); }
+
+h2 { font-size: 15px; margin: 24px 0 8px; }
+.result { border-top: 1px solid var(--rule); padding: 10px 0 2px; }
+.result header { padding: 0; gap: 12px; align-items: center; margin-bottom: 6px; }
+.result .score { font: 13px var(--mono); color: var(--muted); }
+.result .letters span { cursor: pointer; user-select: none; }
+.result .letters span.sel { background: var(--sel); }
+.result.live { opacity: 0.8; }
+.empty { color: var(--muted); padding: 16px 0; }
+
+aside h3 { font-size: 14px; margin: 0 0 6px; }
+aside .group { background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; padding: 12px; margin-bottom: 16px; }
+.crib-form { display: flex; gap: 6px; }
+.crib-form input { flex: 1; min-width: 0; text-transform: uppercase; font-family: var(--mono); }
+.crib-list { list-style: none; margin: 10px 0 0; padding: 0; font: 13px var(--mono); }
+.crib-list li { display: grid; grid-template-columns: 34px 1fr auto; gap: 6px; align-items: center; padding: 4px 0; border-top: 1px solid var(--rule); }
+.crib-list .pos { color: var(--muted); }
+.crib-list button { font: 12px var(--sans); padding: 2px 6px; }
+.kv input { width: 100%; min-width: 0; }
+.kv { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 10px; align-items: center; font-size: 13px; }
+
+pre.plain { white-space: pre-wrap; word-break: break-all; font: 14px/1.6 var(--mono); background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; padding: 10px 12px; margin: 6px 0 0; }
+.err { color: var(--b); }
+@media (prefers-reduced-motion: reduce) { .progress i { transition: none; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>cryptok <span>code cracker 2.0</span></h1>
+  <nav role="tablist">
+    <button role="tab" aria-selected="true" data-tab="rkc">Running key</button>
+    <button role="tab" aria-selected="false" data-tab="known">Known texts</button>
+    <button role="tab" aria-selected="false" data-tab="vig">Vigenère</button>
+  </nav>
+  <div id="status">Loading model…</div>
+</header>
+
+<main>
+  <div class="cipher-box">
+    <label class="field" for="cipher">Ciphertext. Only letters are used; spaces, line breaks and ? marks are kept for display.</label>
+    <textarea id="cipher" spellcheck="false" autocomplete="off"></textarea>
+    <div class="count" id="count">0 letters</div>
+  </div>
+
+  <!-- Running key -->
+  <section class="panel on" id="p-rkc" role="tabpanel">
+    <div>
+      <div class="bar">
+        <button class="primary" id="solve">Solve</button>
+        <label class="field" for="beam">Beam</label>
+        <select id="beam">
+          <option value="10000">10,000 (fast)</option>
+          <option value="50000">50,000</option>
+          <option value="100000" selected>100,000</option>
+          <option value="500000">500,000 (slow)</option>
+        </select>
+        <div class="progress" aria-hidden="true"><i id="rkc-prog"></i></div>
+        <span class="count" id="rkc-time"></span>
+      </div>
+
+      <div class="tape" id="tape"></div>
+      <div class="legend">
+        <span><b class="ka">A</b> and <b class="kb">B</b> are the two texts; key and plaintext are interchangeable.</span>
+        <span>Type a letter in either row to pin it. The other row follows.</span>
+      </div>
+      <div class="bar" style="margin-top:10px">
+        <button class="quiet" id="clear-hints">Clear pins</button>
+        <button class="quiet" id="swap-hints">Swap A and B</button>
+      </div>
+
+      <h2 id="rkc-head">Results</h2>
+      <div id="rkc-results"><p class="empty">Paste a cipher and press Solve. Drag across letters in a result to select them, then pin them as hints and solve again.</p></div>
+    </div>
+
+    <aside>
+      <div class="group">
+        <h3>Try a crib</h3>
+        <form class="crib-form" id="crib-form">
+          <input type="text" id="crib" placeholder="e.g. THE" aria-label="Crib word" spellcheck="false">
+          <button class="quiet" type="submit">Place</button>
+        </form>
+        <p class="note">Positions where the other text reads most like English come first.</p>
+        <ul class="crib-list" id="crib-list"></ul>
+      </div>
+      <div class="group">
+        <h3>Pinned letters</h3>
+        <p class="note" id="pin-summary">None yet.</p>
+      </div>
+    </aside>
+  </section>
+
+  <!-- Known texts -->
+  <section class="panel" id="p-known" role="tabpanel">
+    <div>
+      <div class="bar">
+        <button class="primary" id="known-run">Search known texts</button>
+        <div class="progress" aria-hidden="true"><i id="known-prog"></i></div>
+        <span class="count" id="known-time"></span>
+      </div>
+      <p class="note">Slides every source text along the cipher as a candidate key. A match shows up even when the key differs from the source in places.</p>
+      <div id="known-results"></div>
+    </div>
+    <aside>
+      <div class="group">
+        <h3>Sources</h3>
+        <p class="note" id="sources-note"></p>
+      </div>
+    </aside>
+  </section>
+
+  <!-- Vigenère -->
+  <section class="panel" id="p-vig" role="tabpanel">
+    <div>
+      <div class="bar">
+        <button class="primary" id="vig-run">Solve Vigenère</button>
+        <span class="count" id="vig-time"></span>
+      </div>
+      <div id="vig-results"><p class="empty">Repeating-key Vigenère, optionally over a keyword-mixed alphabet (as in Kryptos K1 and K2).</p></div>
+    </div>
+    <aside>
+      <div class="group kv">
+        <label for="alphabets">Alphabets</label>
+        <input type="text" id="alphabets" value=", KRYPTOS">
+        <label for="maxp">Longest key</label>
+        <input type="number" id="maxp" value="20" min="1" max="40">
+      </div>
+      <p class="note">Alphabet keywords, comma-separated. Leave an entry blank for the standard A–Z alphabet.</p>
+    </aside>
+  </section>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const L = (i) => String.fromCharCode(65 + i);
+const mod = (x) => ((x % 26) + 26) % 26;
+
+const state = {
+  letters: [],   // cipher letters 0..25
+  pinA: [],      // pinned A-stream letter per position (null if free)
+  running: null, // active EventSource
+  liveBest: null,
+  results: [],
+  showAll: false,
+};
+
+// ---------- tabs
+document.querySelectorAll('nav button').forEach((b) => b.addEventListener('click', () => {
+  document.querySelectorAll('nav button').forEach((x) => x.setAttribute('aria-selected', x === b));
+  document.querySelectorAll('.panel').forEach((p) => p.classList.toggle('on', p.id === 'p-' + b.dataset.tab));
+}));
+
+// ---------- info
+fetch('/api/info').then((r) => r.json()).then((info) => {
+  $('#status').textContent = `Order-${info.order} model ready, ${info.threads} cores`;
+  $('#sources-note').textContent = `${info.sources.length} texts, ${(info.source_letters / 1e6).toFixed(1)} million letters. ` +
+    `Start the server with --sources to add your own (lyrics, speeches, books).`;
+}).catch(() => { $('#status').textContent = 'Server not reachable'; });
+
+// ---------- cipher
+function readCipher() {
+  const t = $('#cipher').value.toUpperCase();
+  const letters = [];
+  for (const ch of t) if (ch >= 'A' && ch <= 'Z') letters.push(ch.charCodeAt(0) - 65);
+  const changed = letters.length !== state.letters.length || letters.some((x, i) => x !== state.letters[i]);
+  if (changed) {
+    state.letters = letters;
+    state.pinA = letters.map((_, i) => state.pinA[i] ?? null).slice(0, letters.length);
+    state.results = [];
+    $('#count').textContent = `${letters.length} letters`;
+    renderTape();
+    renderResults();
+    $('#crib-list').innerHTML = '';
+  }
+}
+$('#cipher').addEventListener('input', readCipher);
+
+// ---------- layout helpers: worksheet lines
+function perLine(container) {
+  const cell = 22, w = (container.clientWidth || 800) - 34 - 26;
+  const n = Math.max(10, Math.floor(w / cell));
+  return n - (n % 5);
+}
+
+// ---------- tape (hint editor)
+function renderTape() {
+  const tape = $('#tape');
+  const n = state.letters.length;
+  if (!n) { tape.innerHTML = '<p class="empty">Cipher letters will appear here.</p>'; updatePins(); return; }
+  const per = perLine(tape);
+  let html = '';
+  for (let s = 0; s < n; s += per) {
+    const e = Math.min(n, s + per);
+    let c = '', a = '', b = '';
+    for (let i = s; i < e; i++) {
+      const pa = state.pinA[i];
+      const cls = pa !== null ? ' pinned' : '';
+      c += `<span>${L(state.letters[i])}</span>`;
+      a += `<input class="${cls}" data-i="${i}" data-r="a" maxlength="1" value="${pa !== null ? L(pa) : ''}" aria-label="A letter ${i + 1}">`;
+      b += `<input class="${cls}${pa !== null ? ' derived' : ''}" data-i="${i}" data-r="b" maxlength="1" value="${pa !== null ? L(mod(state.letters[i] - pa)) : ''}" aria-label="B letter ${i + 1}">`;
+    }
+    html += `<div class="line"><div class="idx">${s + 1}</div><div class="rows"><div class="row c">${c}</div><div class="row a">${a}</div><div class="row b">${b}</div></div></div>`;
+  }
+  tape.innerHTML = html;
+  updatePins();
+}
+
+function setPin(i, row, letter) {
+  if (letter === null) state.pinA[i] = null;
+  else state.pinA[i] = row === 'a' ? letter : mod(state.letters[i] - letter);
+}
+
+$('#tape').addEventListener('keydown', (e) => {
+  const t = e.target;
+  if (t.tagName !== 'INPUT') return;
+  const i = +t.dataset.i, r = t.dataset.r;
+  const focus = (j) => { const x = $(`#tape input[data-i="${j}"][data-r="${r}"]`); if (x) { x.focus(); x.select(); } };
+  if (/^[a-zA-Z]$/.test(e.key) && !e.ctrlKey && !e.metaKey) {
+    e.preventDefault();
+    setPin(i, r, e.key.toUpperCase().charCodeAt(0) - 65);
+    renderTape(); focus(i + 1);
+  } else if (e.key === 'Backspace') {
+    e.preventDefault();
+    if (state.pinA[i] !== null) { setPin(i, r, null); renderTape(); focus(i); }
+    else { setPin(i - 1, r, null); renderTape(); focus(i - 1); }
+  } else if (e.key === 'Delete' || e.key === '_' || e.key === ' ') {
+    e.preventDefault(); setPin(i, r, null); renderTape(); focus(i + 1);
+  } else if (e.key === 'ArrowRight') { e.preventDefault(); focus(i + 1); }
+  else if (e.key === 'ArrowLeft') { e.preventDefault(); focus(i - 1); }
+  else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    const x = $(`#tape input[data-i="${i}"][data-r="${r === 'a' ? 'b' : 'a'}"]`); if (x) x.focus();
+  } else if (e.key.length === 1) e.preventDefault();
+});
+
+function updatePins() {
+  const n = state.pinA.filter((x) => x !== null).length;
+  $('#pin-summary').textContent = n ? `${n} of ${state.letters.length} positions pinned. The next solve keeps them fixed.` : 'None yet.';
+}
+$('#clear-hints').addEventListener('click', () => { state.pinA = state.pinA.map(() => null); renderTape(); });
+$('#swap-hints').addEventListener('click', () => {
+  state.pinA = state.pinA.map((a, i) => a === null ? null : mod(state.letters[i] - a)); renderTape();
+});
+
+// ---------- results with drag selection
+function renderResults() {
+  const box = $('#rkc-results');
+  const list = state.results.length ? state.results : (state.liveBest ? state.liveBest : []);
+  if (!list.length) { box.innerHTML = state.letters.length ? '<p class="empty">No results yet. Press Solve.</p>' : '<p class="empty">Paste a cipher and press Solve.</p>'; return; }
+  const per = perLine(box);
+  const live = !state.results.length;
+  const shown = state.showAll ? list : list.slice(0, 3);
+  box.innerHTML = shown.map((r, k) => {
+    let lines = '';
+    for (let s = 0; s < r.a.length; s += per) {
+      const e = Math.min(r.a.length, s + per);
+      const span = (str, cls) => [...str.slice(s, e)].map((ch, j) => `<span data-i="${s + j}">${ch}</span>`).join('');
+      lines += `<div class="line"><div class="idx">${s + 1}</div><div class="rows letters"><div class="row a">${span(r.a)}</div><div class="row b">${span(r.b)}</div></div></div>`;
+    }
+    return `<div class="result${live ? ' live' : ''}" data-k="${k}"><header><strong>${live ? 'Best so far' : '#' + (k + 1)}</strong>
+      <span class="score">${r.per_letter.toFixed(3)} per letter</span>
+      ${live ? '' : `<button class="quiet pin-sel" disabled>Pin selection</button><button class="quiet pin-all">Pin all</button>`}</header>${lines}</div>`;
+  }).join('') + (list.length > shown.length ? `<button class="quiet" id="show-all">Show ${list.length - shown.length} more</button>` : '');
+}
+
+let drag = null;
+$('#rkc-results').addEventListener('pointerdown', (e) => {
+  const sp = e.target.closest('.letters span'); if (!sp) return;
+  const res = sp.closest('.result'); if (res.classList.contains('live')) return;
+  document.querySelectorAll('.result .sel').forEach((x) => x.classList.remove('sel'));
+  document.querySelectorAll('.pin-sel').forEach((b) => b.disabled = true);
+  drag = { res, from: +sp.dataset.i, to: +sp.dataset.i };
+  paintSel(); e.preventDefault();
+});
+$('#rkc-results').addEventListener('pointerover', (e) => {
+  if (!drag) return;
+  const sp = e.target.closest('.letters span');
+  if (sp && sp.closest('.result') === drag.res) { drag.to = +sp.dataset.i; paintSel(); }
+});
+window.addEventListener('pointerup', () => { if (drag) { drag.res.querySelector('.pin-sel').disabled = false; drag.done = true; selection = drag; drag = null; } });
+let selection = null;
+function paintSel() {
+  const [lo, hi] = [Math.min(drag.from, drag.to), Math.max(drag.from, drag.to)];
+  drag.res.querySelectorAll('.letters span').forEach((x) => x.classList.toggle('sel', +x.dataset.i >= lo && +x.dataset.i <= hi));
+}
+$('#rkc-results').addEventListener('click', (e) => {
+  if (e.target.id === 'show-all') { state.showAll = true; renderResults(); return; }
+  const res = e.target.closest('.result'); if (!res) return;
+  const r = state.results[+res.dataset.k]; if (!r) return;
+  let lo = 0, hi = r.a.length - 1;
+  if (e.target.classList.contains('pin-sel')) {
+    if (!selection || selection.res !== res) return;
+    lo = Math.min(selection.from, selection.to); hi = Math.max(selection.from, selection.to);
+  } else if (!e.target.classList.contains('pin-all')) return;
+  for (let i = lo; i <= hi; i++) state.pinA[i] = r.a.charCodeAt(i) - 65;
+  renderTape();
+  $('#tape').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+});
+
+// ---------- solve (streamed)
+function stream(url, onProgress, onDone, onEnd) {
+  const es = new EventSource(url);
+  es.addEventListener('progress', (e) => onProgress(JSON.parse(e.data)));
+  es.addEventListener('done', (e) => { es.close(); onDone(JSON.parse(e.data)); onEnd(); });
+  es.addEventListener('failed', (e) => { es.close(); onDone({ error: JSON.parse(e.data) }); onEnd(); });
+  es.onerror = () => { es.close(); onEnd(); };
+  return es;
+}
+
+$('#solve').addEventListener('click', () => {
+  const btn = $('#solve');
+  if (state.running) { state.running.close(); state.running = null; btn.textContent = 'Solve'; btn.classList.remove('stop'); return; }
+  readCipher();
+  if (!state.letters.length) return;
+  const pins = state.pinA.map((x) => x === null ? '_' : L(x)).join('');
+  const t0 = performance.now();
+  state.results = []; state.liveBest = null; state.showAll = false; renderResults();
+  btn.textContent = 'Stop'; btn.classList.add('stop');
+  $('#rkc-head').textContent = 'Results';
+  state.running = stream(`/api/rkc?cipher=${encodeURIComponent($('#cipher').value)}&beam=${$('#beam').value}&key=${pins}`,
+    (p) => {
+      $('#rkc-prog').style.width = (100 * p.step / p.total) + '%';
+      $('#rkc-time').textContent = `${p.step} / ${p.total}`;
+      state.liveBest = p.best.slice(0, 1); renderResults();
+    },
+    (d) => {
+      if (d.error) { $('#rkc-results').innerHTML = `<p class="err">${d.error}</p>`; return; }
+      state.results = d.results; state.liveBest = null;
+      $('#rkc-time').textContent = `${d.secs.toFixed(2)} s`;
+      renderResults();
+    },
+    () => { state.running = null; btn.textContent = 'Solve'; btn.classList.remove('stop'); });
+});
+
+// ---------- cribs
+$('#crib-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  readCipher();
+  const word = $('#crib').value.toUpperCase().replace(/[^A-Z]/g, '');
+  if (!word || !state.letters.length) return;
+  fetch(`/api/crib?cipher=${encodeURIComponent($('#cipher').value)}&word=${word}`).then((r) => r.json()).then((hits) => {
+    $('#crib-list').innerHTML = hits.map((h) => `<li><span class="pos">${h.pos + 1}</span><span>${h.other}</span>
+      <span><button class="quiet" data-pos="${h.pos}" data-as="a" title="Put ${word} in row A">A</button>
+      <button class="quiet" data-pos="${h.pos}" data-as="b" title="Put ${word} in row B">B</button></span></li>`).join('')
+      || '<li>No room for that word.</li>';
+    $('#crib-list').dataset.word = word;
+  });
+});
+$('#crib-list').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  const word = $('#crib-list').dataset.word, pos = +b.dataset.pos;
+  for (let j = 0; j < word.length; j++) setPin(pos + j, b.dataset.as, word.charCodeAt(j) - 65);
+  renderTape();
+});
+
+// ---------- known texts
+$('#known-run').addEventListener('click', () => {
+  const btn = $('#known-run');
+  if (btn.dataset.es) return;
+  readCipher();
+  const t0 = performance.now();
+  btn.disabled = true; $('#known-results').innerHTML = '';
+  stream(`/api/known?cipher=${encodeURIComponent($('#cipher').value)}`,
+    (p) => { $('#known-prog').style.width = p.pct + '%'; },
+    (d) => {
+      if (d.error) { $('#known-results').innerHTML = `<p class="err">${d.error}</p>`; return; }
+      $('#known-time').textContent = `${d.secs.toFixed(2)} s`;
+      const n = state.letters.length, per = perLine($('#known-results'));
+      $('#known-results').innerHTML = d.results.map((h, k) => {
+        const pad = (s) => '·'.repeat(h.start) + s + '·'.repeat(n - h.end);
+        const ka = pad(h.key), kb = pad(h.other);
+        let lines = '';
+        for (let s = 0; s < n; s += per) {
+          const e = Math.min(n, s + per);
+          const sp = (str) => [...str.slice(s, e)].map((c) => `<span>${c}</span>`).join('');
+          lines += `<div class="line"><div class="idx">${s + 1}</div><div class="rows"><div class="row a">${sp(ka)}</div><div class="row b">${sp(kb)}</div></div></div>`;
+        }
+        return `<div class="result" data-k="${k}"><header><strong>${h.source}</strong>
+          <span class="score">from letter ${h.offset}, reads as English in ${(h.coverage * 100).toFixed(0)}% of positions</span>
+          <button class="quiet use-known">Pin as hints</button></header>${lines}</div>`;
+      }).join('') || '<p class="empty">No source lines up with this cipher.</p>';
+      state.known = d.results;
+    },
+    () => { btn.disabled = false; });
+});
+$('#known-results').addEventListener('click', (e) => {
+  if (!e.target.classList.contains('use-known')) return;
+  const h = state.known[+e.target.closest('.result').dataset.k];
+  for (let i = h.start; i < h.end; i++) state.pinA[i] = h.key.charCodeAt(i - h.start) - 65;
+  renderTape();
+  document.querySelector('nav button[data-tab="rkc"]').click();
+});
+
+// ---------- vigenère
+$('#vig-run').addEventListener('click', () => {
+  const btn = $('#vig-run'); btn.disabled = true;
+  $('#vig-results').innerHTML = '<p class="empty">Solving…</p>';
+  fetch(`/api/vigenere?text=${encodeURIComponent($('#cipher').value)}&alphabets=${encodeURIComponent($('#alphabets').value)}&max_period=${$('#maxp').value}`)
+    .then((r) => r.json()).then((d) => {
+      $('#vig-time').textContent = `${d.secs.toFixed(2)} s`;
+      $('#vig-results').innerHTML = d.results.map((r, k) => `<div class="result"><header><strong>${k === 0 ? 'Best' : '#' + (k + 1)}: key ${r.key}</strong>
+        <span class="score">length ${r.period}, alphabet ${r.alphabet}, ${r.per_letter.toFixed(3)} per letter</span></header>
+        <pre class="plain">${r.plain.replace(/[<&]/g, (c) => c === '<' ? '&lt;' : '&amp;')}</pre></div>`).join('');
+    }).finally(() => { btn.disabled = false; });
+});
+
+let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { renderTape(); renderResults(); }, 150); });
+renderTape();
+</script>
+</body>
+</html>

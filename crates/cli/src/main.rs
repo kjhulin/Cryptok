@@ -3,6 +3,8 @@
 use cryptok_core::lm::LangModel;
 use cryptok_core::rkc::{self, RkcOptions, StepInfo};
 use cryptok_core::text::{enc, scrub, strip_gutenberg, unscrub};
+mod serve;
+
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -13,6 +15,8 @@ const USAGE: &str = "\
 Cryptok Code Cracker 2.0
 
 USAGE:
+  cryptok serve  [--model FILE] [--sources DIR_OR_FILE,...] [--port 8077] [--no-open]
+                 (web UI in your browser)
   cryptok train  [--corpus DIR] [--order N] [--out FILE] [--exclude a.txt,b.txt]
   cryptok score  [--model FILE] TEXT...
   cryptok rkc    [--model FILE] [--beam N] [--results N] [--threads N]
@@ -38,7 +42,7 @@ struct Args {
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
-    const SWITCHES: &[&str] = &["quiet", "help"];
+    const SWITCHES: &[&str] = &["quiet", "help", "no-open"];
     let mut a = Args { flags: HashMap::new(), switches: vec![], pos: vec![] };
     let mut i = 0;
     while i < args.len() {
@@ -86,6 +90,7 @@ fn main() -> ExitCode {
         "train" => parse(&argv[1..]).and_then(|a| cmd_train(&a)),
         "score" => parse(&argv[1..]).and_then(|a| cmd_score(&a)),
         "rkc" => parse(&argv[1..]).and_then(|a| cmd_rkc(&a)),
+        "serve" => parse(&argv[1..]).and_then(|a| cmd_serve(&a)),
         "crib" => parse(&argv[1..]).and_then(|a| cmd_crib(&a)),
         "known" => parse(&argv[1..]).and_then(|a| cmd_known(&a)),
         "vigenere" | "vig" => parse(&argv[1..]).and_then(|a| cmd_vigenere(&a)),
@@ -221,6 +226,18 @@ fn cmd_vigenere(a: &Args) -> Result<(), String> {
         println!("    {}", relayout(&original, &s.plain).replace('\n', "\n    "));
     }
     Ok(())
+}
+
+fn cmd_serve(a: &Args) -> Result<(), String> {
+    let lm = load_model(a)?;
+    let default_sources = if Path::new("bench/private").is_dir() { "corpus,bench/private" } else { "corpus" };
+    let paths: Vec<PathBuf> = a.get("sources", default_sources).split(',').filter(|s| !s.is_empty()).map(PathBuf::from).collect();
+    let sources = cryptok_core::known::load_sources(&paths).map_err(|e| e.to_string())?;
+    eprintln!("loaded {} known-text sources", sources.len());
+    let quad = lm.dense(4.min(lm.order() + 1));
+    let port = a.num("port", 8077)? as u16;
+    let state = serve::ServerState { lm, quad, sources, model_path: a.get("model", "cryptok.cklm") };
+    serve::run(state, port, !a.has("no-open"))
 }
 
 fn cmd_crib(a: &Args) -> Result<(), String> {

@@ -2,7 +2,7 @@
 
 A rewrite of [CryptokCodeCracker](https://github.com/kjhulin/CryptokCodeCracker) in Rust, focused on fast and accurate running key cipher (RKC) solving, with a CLI and (coming) a local web UI.
 
-**Status:** early development. The language model, RKC solver, CLI and benchmark harness work; the web UI and classic-cipher tools are next.
+**Status:** early development. Working today: language model, running key solver (Viterbi), known-text key search, crib search, keyed-alphabet Vigenère (solves Kryptos K1/K2), CLI, and a browser UI.
 
 ## Build
 
@@ -16,11 +16,30 @@ No external crates are required.
 ## Quick start
 
 ```
-cryptok train                                  # learns corpus/ -> cryptok.cklm (~5 s, ~95 MB)
+cryptok train          # once: learns corpus/ -> cryptok.cklm (~5 s, ~95 MB)
+cryptok serve          # opens the web UI at http://127.0.0.1:8077/
+```
+
+The web UI has three tabs:
+
+- **Running key** — solve, pin letters on the worksheet (type in either stream; the other follows), place cribs, drag across a result to pin that stretch, solve again.
+- **Known texts** — slide every source text along the cipher as a candidate key. Add your own sources (lyrics, speeches) with `--sources corpus,path/to/texts`.
+- **Vigenère** — repeating-key Vigenère, optionally over keyword-mixed alphabets.
+
+### Command line
+
+```
 cryptok rkc BVFBHGHXAWJEKEDMDZAPRMWGNMTVIRPWIKHGIPUU
 cryptok rkc --plain-hint '____THE___' CIPHER   # fix known plaintext letters ('_' = unknown)
+cryptok crib --word REDSHIRT CIPHER           # best positions for a crib
+cryptok known --sources corpus,bench/private CIPHER   # known-text key search
+cryptok vigenere --alphabet ",KRYPTOS" "$(cat bench/kryptos/k2.txt)"
 cryptok score "some text"                      # language-model score
 ```
+
+## Tests
+
+`cargo test --release` runs unit tests plus regression tests on real puzzles (Kryptos K1/K2, DEF CON 23) when a trained model is present.
 
 Key and plaintext are interchangeable in a running key cipher, so results are shown as two streams, A and B.
 
