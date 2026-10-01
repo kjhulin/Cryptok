@@ -17,6 +17,9 @@ USAGE:
   cryptok score  [--model FILE] TEXT...
   cryptok rkc    [--model FILE] [--beam N] [--results N] [--threads N]
                  [--key-hint HINT] [--plain-hint HINT] [--quiet] CIPHER...
+  cryptok crib   [--model FILE] [--results N] --word WORD CIPHER...
+  cryptok known  [--model FILE] [--sources DIR_OR_FILE,...] [--window N] [--results N] CIPHER...
+                 (slide known texts along the cipher as candidate running keys)
   cryptok vigenere [--model FILE] [--alphabet KW1,KW2,...] [--max-period N] [--restarts N]
                  [--results N] TEXT...
   cryptok bench gen [--corpus DIR] --holdout a.txt,b.txt [--out FILE] [--seed N] [--per-length N]
@@ -83,6 +86,8 @@ fn main() -> ExitCode {
         "train" => parse(&argv[1..]).and_then(|a| cmd_train(&a)),
         "score" => parse(&argv[1..]).and_then(|a| cmd_score(&a)),
         "rkc" => parse(&argv[1..]).and_then(|a| cmd_rkc(&a)),
+        "crib" => parse(&argv[1..]).and_then(|a| cmd_crib(&a)),
+        "known" => parse(&argv[1..]).and_then(|a| cmd_known(&a)),
         "vigenere" | "vig" => parse(&argv[1..]).and_then(|a| cmd_vigenere(&a)),
         "bench" => match argv.get(1).map(String::as_str) {
             Some("gen") => parse(&argv[2..]).and_then(|a| cmd_bench_gen(&a)),
@@ -214,6 +219,57 @@ fn cmd_vigenere(a: &Args) -> Result<(), String> {
     for (i, s) in all.iter().take(results).enumerate() {
         println!("[{}] period {:>2}  key {:<20} alphabet {}  {:.3}/letter", i + 1, s.period, unscrub(&s.key), s.alphabet, s.per_letter());
         println!("    {}", relayout(&original, &s.plain).replace('\n', "\n    "));
+    }
+    Ok(())
+}
+
+fn cmd_crib(a: &Args) -> Result<(), String> {
+    let cipher = scrub(&a.pos.join(""));
+    let word = scrub(&a.get("word", ""));
+    if cipher.is_empty() || word.is_empty() {
+        return Err("usage: cryptok crib --word WORD CIPHER".into());
+    }
+    let lm = load_model(a)?;
+    for h in rkc::crib_search(&lm, &cipher, &word).iter().take(a.num("results", 15)?) {
+        println!("{:>4}  {:7.3}/letter  {}", h.pos, h.score, unscrub(&h.other));
+    }
+    Ok(())
+}
+
+fn cmd_known(a: &Args) -> Result<(), String> {
+    use cryptok_core::known::{self, KnownOptions};
+    let cipher = scrub(&a.pos.join(""));
+    if cipher.is_empty() {
+        return Err("no cipher letters given".into());
+    }
+    let lm = load_model(a)?;
+    let paths: Vec<PathBuf> = a.get("sources", "corpus").split(',').filter(|s| !s.is_empty()).map(PathBuf::from).collect();
+    let t = Instant::now();
+    let sources = known::load_sources(&paths).map_err(|e| e.to_string())?;
+    let letters: usize = sources.iter().map(|s| s.letters.len()).sum();
+    eprintln!("loaded {} sources ({:.1}M letters) in {:.2}s", sources.len(), letters as f64 / 1e6, t.elapsed().as_secs_f64());
+    let quad = lm.dense(4.min(lm.order() + 1));
+    let opts = KnownOptions { window: a.num("window", 24)?, results: a.num("results", 10)?, threads: a.num("threads", 0)?, ..Default::default() };
+    let t = Instant::now();
+    let quiet = a.has("quiet");
+    let prog = |d: usize, tot: usize| {
+        if !quiet {
+            eprint!("\r  {:>5.1}%", d as f64 * 100.0 / tot.max(1) as f64);
+        }
+    };
+    let hits = known::search(&lm, &quad, &cipher, &sources, &opts, Some(&prog), None);
+    if !quiet {
+        eprintln!();
+    }
+    println!("searched {} alignments in {:.2}s", letters, t.elapsed().as_secs_f64());
+    for (i, h) in hits.iter().enumerate() {
+        let pad = |v: &[u8]| format!("{}{}{}", ".".repeat(h.start), unscrub(v), ".".repeat(cipher.len() - h.end));
+        println!(
+            "[{:>2}] {} @ {}  best-window {:.3}/letter  overall {:.3}/letter  English coverage {:.0}%",
+            i + 1, h.source, h.offset, h.window_score, h.score, h.coverage * 100.0
+        );
+        println!("     key:   {}", pad(&h.key));
+        println!("     other: {}", pad(&h.plain));
     }
     Ok(())
 }

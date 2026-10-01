@@ -257,6 +257,32 @@ pub fn pair_accuracy(sol: &RkcSolution, key: &[u8], plain: &[u8]) -> f64 {
     ok as f64 / key.len() as f64
 }
 
+/// A crib placed at a cipher position: the other stream there is `cipher - crib`.
+#[derive(Clone, Debug)]
+pub struct CribHit {
+    pub pos: usize,
+    pub other: Vec<u8>,
+    /// Mean log-prob per letter of `other` (full model, no left context).
+    pub score: f32,
+}
+
+/// Try a crib (a word believed to be in the key *or* the plaintext — the result is the
+/// same) at every position and rank positions by how English the other stream looks.
+pub fn crib_search(lm: &LangModel, cipher: &[u8], crib: &[u8]) -> Vec<CribHit> {
+    let m = crib.len();
+    if m == 0 || m > cipher.len() {
+        return vec![];
+    }
+    let mut hits: Vec<CribHit> = (0..=cipher.len() - m)
+        .map(|pos| {
+            let other: Vec<u8> = (0..m).map(|i| dec(cipher[pos + i], crib[i])).collect();
+            CribHit { pos, score: lm.score_per_letter(&other), other }
+        })
+        .collect();
+    hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+    hits
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

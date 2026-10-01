@@ -5,6 +5,7 @@
 //! * [`rkc`]   — running key cipher solver (Viterbi beam search with state merging).
 
 pub mod classic;
+pub mod known;
 pub mod lm;
 pub mod map;
 pub mod rkc;
