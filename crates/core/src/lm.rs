@@ -371,6 +371,12 @@ impl DenseNgram {
         unsafe { *self.t.get_unchecked(idx) }
     }
 
+    /// Value at a base-26 packed index (first letter most significant).
+    #[inline]
+    pub fn value(&self, idx: usize) -> f32 {
+        self.t[idx]
+    }
+
     /// Sum over all complete n-gram windows.
     pub fn score(&self, s: &[u8]) -> f32 {
         (self.n.saturating_sub(1)..s.len()).map(|e| self.window(s, e)).sum()
