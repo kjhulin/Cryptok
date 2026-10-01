@@ -17,6 +17,8 @@ USAGE:
   cryptok score  [--model FILE] TEXT...
   cryptok rkc    [--model FILE] [--beam N] [--results N] [--threads N]
                  [--key-hint HINT] [--plain-hint HINT] [--quiet] CIPHER...
+  cryptok vigenere [--model FILE] [--alphabet KW1,KW2,...] [--max-period N] [--restarts N]
+                 [--results N] TEXT...
   cryptok bench gen [--corpus DIR] --holdout a.txt,b.txt [--out FILE] [--seed N] [--per-length N]
   cryptok bench run [--model FILE] [--cases FILE] [--beam N] [--threads N]
 
@@ -81,6 +83,7 @@ fn main() -> ExitCode {
         "train" => parse(&argv[1..]).and_then(|a| cmd_train(&a)),
         "score" => parse(&argv[1..]).and_then(|a| cmd_score(&a)),
         "rkc" => parse(&argv[1..]).and_then(|a| cmd_rkc(&a)),
+        "vigenere" | "vig" => parse(&argv[1..]).and_then(|a| cmd_vigenere(&a)),
         "bench" => match argv.get(1).map(String::as_str) {
             Some("gen") => parse(&argv[2..]).and_then(|a| cmd_bench_gen(&a)),
             Some("run") => parse(&argv[2..]).and_then(|a| cmd_bench_run(&a)),
@@ -174,6 +177,42 @@ fn cmd_rkc(a: &Args) -> Result<(), String> {
         println!("[{:>2}] {:8.3}/letter  total {:9.2}", i + 1, s.per_letter(), s.score);
         println!("     A: {}", unscrub(&s.key));
         println!("     B: {}", unscrub(&s.plain));
+    }
+    Ok(())
+}
+
+/// Put solved letters back into the original text layout (keeps '?', spaces, punctuation).
+fn relayout(original: &str, letters: &[u8]) -> String {
+    let mut it = letters.iter();
+    original
+        .chars()
+        .map(|ch| if ch.is_ascii_alphabetic() { it.next().map(|&l| (b'A' + l) as char).unwrap_or(ch) } else { ch })
+        .collect()
+}
+
+fn cmd_vigenere(a: &Args) -> Result<(), String> {
+    let original = a.pos.join("\n");
+    let cipher = scrub(&original);
+    if cipher.is_empty() {
+        return Err("no cipher letters given".into());
+    }
+    let lm = load_model(a)?;
+    let max_period = a.num("max-period", 20)?;
+    let restarts = a.num("restarts", 10)?;
+    let results = a.num("results", 3)?;
+    let alphabets: Vec<String> = a.get("alphabet", "").split(',').map(|s| s.trim().to_string()).collect();
+    let t = Instant::now();
+    let mut all = Vec::new();
+    for kw in &alphabets {
+        let alpha = cryptok_core::classic::Alphabet::from_keyword(kw);
+        all.extend(cryptok_core::classic::solve_vigenere(&lm, &cipher, &alpha, max_period, restarts).into_iter().take(results));
+    }
+    let pen = 26f32.ln();
+    all.sort_by(|x, y| (y.score - y.period as f32 * pen).total_cmp(&(x.score - x.period as f32 * pen)));
+    println!("searched periods 1..={max_period} over {} alphabet(s) in {:.2}s", alphabets.len(), t.elapsed().as_secs_f64());
+    for (i, s) in all.iter().take(results).enumerate() {
+        println!("[{}] period {:>2}  key {:<20} alphabet {}  {:.3}/letter", i + 1, s.period, unscrub(&s.key), s.alphabet, s.per_letter());
+        println!("    {}", relayout(&original, &s.plain).replace('\n', "\n    "));
     }
     Ok(())
 }

@@ -4,6 +4,7 @@
 //! * [`lm`]    — interpolated Kneser–Ney character n-gram language model.
 //! * [`rkc`]   — running key cipher solver (Viterbi beam search with state merging).
 
+pub mod classic;
 pub mod lm;
 pub mod map;
 pub mod rkc;
