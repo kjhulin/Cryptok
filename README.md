@@ -37,6 +37,13 @@ cryptok vigenere --alphabet ",KRYPTOS" "$(cat bench/kryptos/k2.txt)"
 cryptok score "some text"                      # language-model score
 ```
 
+## Releases and CI
+
+GitHub Actions runs build + tests on Linux, macOS and Windows for every PR, plus an accuracy gate
+(`cryptok bench run --min-acc 60`) that fails if running-key accuracy regresses. Pushing a `v*` tag
+builds per-platform archives (binary, corpus, word list) and a pre-trained `cryptok.cklm` model and
+attaches them to a GitHub release.
+
 ## Tests
 
 `cargo test --release` runs unit tests plus regression tests on real puzzles (Kryptos K1/K2, DEF CON 23) when a trained model is present.

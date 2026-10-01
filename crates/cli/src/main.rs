@@ -389,6 +389,13 @@ fn cmd_bench_run(a: &Args) -> Result<(), String> {
             v.iter().map(|x| x.1).sum::<f64>() / n
         );
     }
+    let all: Vec<f64> = by_len.iter().flat_map(|(_, v)| v.iter().map(|x| x.0)).collect();
+    let overall = all.iter().sum::<f64>() / all.len().max(1) as f64 * 100.0;
+    println!("overall mean acc {overall:.1}%");
     println!("total {:.1}s", total.elapsed().as_secs_f64());
+    let min = a.num("min-acc", 0)? as f64;
+    if overall < min {
+        return Err(format!("accuracy regression: {overall:.1}% < required {min:.1}%"));
+    }
     Ok(())
 }
