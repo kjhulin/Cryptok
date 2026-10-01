@@ -1,0 +1,37 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build
+        run: cargo build --release
+      - name: Train model (needed by the real-cipher regression tests)
+        run: cargo run --release -- train
+      - name: Test
+        run: cargo test --release
+
+  accuracy:
+    # Guards against accuracy regressions of the running-key solver.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Train held-out model
+        run: cargo run --release -- train --exclude 1342.txt,2701.txt,84.txt --out bench/holdout.cklm
+      - name: Benchmark
+        run: cargo run --release -- bench run --model bench/holdout.cklm --beam 3000 --min-acc 60
