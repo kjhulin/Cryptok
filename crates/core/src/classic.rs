@@ -102,7 +102,11 @@ impl Rng {
 /// Hill-climb the column shifts for a fixed period using a dense n-gram table.
 /// Changing one column only affects the n-gram windows touching that column, so
 /// each trial is scored incrementally. Returns (shifts, n-gram score).
-fn climb(q: &DenseNgram, cipher: &[u8], a: &Alphabet, mut shifts: Vec<u8>) -> (Vec<u8>, f32) {
+fn climb(q: &DenseNgram, cipher: &[u8], a: &Alphabet, shifts: Vec<u8>) -> (Vec<u8>, f32) {
+    climb_n(q, cipher, a, shifts, usize::MAX)
+}
+
+fn climb_n(q: &DenseNgram, cipher: &[u8], a: &Alphabet, mut shifts: Vec<u8>, max_sweeps: usize) -> (Vec<u8>, f32) {
     let n = cipher.len();
     let period = shifts.len();
     let w = q.n;
@@ -129,7 +133,9 @@ fn climb(q: &DenseNgram, cipher: &[u8], a: &Alphabet, mut shifts: Vec<u8>) -> (V
         })
         .collect();
     let part = |buf: &[u8], col: usize| -> f32 { ends[col].iter().map(|&e| q.window(buf, e)).sum() };
+    let mut sweeps = 0;
     loop {
+        sweeps += 1;
         let mut improved = false;
         for col in 0..period {
             let orig = shifts[col];
@@ -152,7 +158,7 @@ fn climb(q: &DenseNgram, cipher: &[u8], a: &Alphabet, mut shifts: Vec<u8>) -> (V
                 improved = true;
             }
         }
-        if !improved {
+        if !improved || sweeps >= max_sweeps {
             return (shifts, cur);
         }
     }
@@ -261,6 +267,143 @@ pub fn solve_vigenere_with(lm: &LangModel, q: &DenseNgram, cipher: &[u8], a: &Al
     out.retain(|s| !(1..s.period).any(|d| s.period % d == 0 && (d..s.period).all(|i| s.key[i] == s.key[i - d])));
     out.sort_by(|x, y| (y.score - y.period as f32 * pen).total_cmp(&(x.score - x.period as f32 * pen)));
     out
+}
+
+/// Mean normalised index of coincidence (x26) of the columns for each period; English ≈ 1.7,
+/// random ≈ 1.0. Independent of the alphabet, so it ranks periods before any alphabet search.
+pub fn period_ic(cipher: &[u8], max_period: usize) -> Vec<(usize, f64)> {
+    (1..=max_period.min(cipher.len() / 2).max(1))
+        .map(|p| {
+            let mut total = 0.0;
+            let mut cols = 0;
+            for col in 0..p {
+                let mut f = [0u32; 26];
+                let mut n = 0u32;
+                for &c in cipher.iter().skip(col).step_by(p) {
+                    f[c as usize] += 1;
+                    n += 1;
+                }
+                if n > 1 {
+                    let s: u32 = f.iter().map(|&x| x * x.saturating_sub(1)).sum();
+                    total += 26.0 * s as f64 / (n * (n - 1)) as f64;
+                    cols += 1;
+                }
+            }
+            (p, if cols > 0 { total / cols as f64 } else { 0.0 })
+        })
+        .collect()
+}
+
+/// Mixed alphabet ranked by how well a quick climb decrypts the cipher with it.
+#[derive(Clone, Debug)]
+pub struct AlphabetHit {
+    pub keyword: String,
+    pub alphabet: Alphabet,
+    pub period: usize,
+    /// Mean n-gram log-prob per letter after climbing, less ln(26)/n per key letter.
+    pub score: f32,
+}
+
+/// Rank candidate alphabet keywords for a Quagmire III (keyed-alphabet Vigenère) cipher.
+/// For each distinct alphabet and each candidate period: n-gram hill climbing from the
+/// unigram start plus `restarts` random starts. Runs on all cores. Practical for lists of
+/// up to a few thousand keywords; a full dictionary takes minutes.
+pub fn rank_alphabets(lm: &LangModel, q: &DenseNgram, cipher: &[u8], keywords: &[String], periods: &[usize], restarts: usize, top: usize) -> Vec<AlphabetHit> {
+    // Distinct alphabets only (keywords with the same de-duplicated letters coincide).
+    let mut seen = std::collections::HashSet::new();
+    let alphas: Vec<(String, Alphabet)> = keywords
+        .iter()
+        .filter_map(|k| {
+            let a = Alphabet::from_keyword(k);
+            seen.insert(a.letters).then(|| (k.to_ascii_uppercase(), a))
+        })
+        .collect();
+    let uni: Vec<f32> = lm.row(0, 0).iter().map(|&x| lm.deq()[x as usize]).collect();
+    // Per period, per column: (letter, count) pairs.
+    let hists: Vec<Vec<Vec<(u8, f32)>>> = periods
+        .iter()
+        .map(|&p| {
+            (0..p)
+                .map(|col| {
+                    let mut f = [0u32; 26];
+                    cipher.iter().skip(col).step_by(p).for_each(|&c| f[c as usize] += 1);
+                    (0..26u8).filter(|&c| f[c as usize] > 0).map(|c| (c, f[c as usize] as f32)).collect()
+                })
+                .collect()
+        })
+        .collect();
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let chunk = alphas.len().div_ceil(threads).max(1);
+    let n = cipher.len().max(1) as f32;
+    let mut hits: Vec<AlphabetHit> = std::thread::scope(|sc| {
+        let hs: Vec<_> = alphas
+            .chunks(chunk)
+            .map(|part| {
+                let (uni, hists) = (&uni, &hists);
+                sc.spawn(move || {
+                    let mut out: Vec<AlphabetHit> = Vec::new();
+                    let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+                    for (kw, a) in part {
+                        for (pi, &p) in periods.iter().enumerate() {
+                            // Unigram start per column from the column's letter histogram.
+                            let init: Vec<u8> = (0..p)
+                                .map(|col| {
+                                    let h = &hists[pi][col];
+                                    let f = |s: u8| -> f32 {
+                                        h.iter().map(|&(c, k)| k * uni[a.letters[((a.index[c as usize] + 26 - s) % 26) as usize] as usize]).sum()
+                                    };
+                                    (0..26u8).max_by(|&x, &y| f(x).total_cmp(&f(y))).unwrap()
+                                })
+                                .collect();
+                            let mut best = climb(q, cipher, a, init);
+                            for _ in 0..restarts {
+                                let start: Vec<u8> = (0..p).map(|_| (rng.next() % 26) as u8).collect();
+                                let r = climb(q, cipher, a, start);
+                                if r.1 > best.1 {
+                                    best = r;
+                                }
+                            }
+                            let sc = best.1;
+                            // Penalise long keys (ln 26 per key letter) so short texts don't over-fit.
+                            out.push(AlphabetHit { keyword: kw.clone(), alphabet: a.clone(), period: p, score: (sc - p as f32 * 26f32.ln()) / n });
+                        }
+                        if out.len() > top * 8 {
+                            out.sort_by(|x, y| y.score.total_cmp(&x.score));
+                            out.truncate(top * 2);
+                        }
+                    }
+                    out
+                })
+            })
+            .collect();
+        hs.into_iter().flat_map(|h| h.join().unwrap()).collect()
+    });
+    hits.sort_by(|x, y| y.score.total_cmp(&x.score));
+    // Keep the best period per alphabet.
+    let mut kept = std::collections::HashSet::new();
+    hits.retain(|h| kept.insert(h.alphabet.letters));
+    hits.truncate(top);
+    hits
+}
+
+/// Solve a keyed-alphabet Vigenère when the alphabet keyword is unknown but is one of
+/// `keywords`. Periods come from the index of coincidence (alphabet-independent); every
+/// candidate alphabet is ranked by a quick climb, then the best few get the full solver.
+/// Short texts automatically get more random restarts (they need them).
+pub fn solve_vigenere_keyword_search(lm: &LangModel, cipher: &[u8], keywords: &[String], max_period: usize, finalists: usize) -> (Vec<AlphabetHit>, Vec<VigenereSolution>) {
+    let mut ic = period_ic(cipher, max_period);
+    ic.sort_by(|a, b| b.1.total_cmp(&a.1));
+    let periods: Vec<usize> = ic.iter().take(3).map(|x| x.0).collect();
+    let q = lm.dense(climb_ngram_size(lm, cipher.len()));
+    let restarts = if cipher.len() < 150 { 20 } else { 2 };
+    let ranked = rank_alphabets(lm, &q, cipher, keywords, &periods, restarts, finalists.max(1));
+    let pen = 26f32.ln();
+    let mut sols: Vec<VigenereSolution> = ranked
+        .iter()
+        .flat_map(|h| solve_vigenere_with(lm, &q, cipher, &h.alphabet, max_period, 30).into_iter().take(1))
+        .collect();
+    sols.sort_by(|x, y| (y.score - y.period as f32 * pen).total_cmp(&(x.score - x.period as f32 * pen)));
+    (ranked, sols)
 }
 
 #[cfg(test)]

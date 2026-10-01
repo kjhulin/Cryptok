@@ -207,6 +207,11 @@ pre.plain { white-space: pre-wrap; word-break: break-all; font: 14px/1.6 var(--m
         <input type="number" id="maxp" value="20" min="1" max="40">
       </div>
       <p class="note">Alphabet keywords, comma-separated. Leave an entry blank for the standard A–Z alphabet.</p>
+      <div class="group" style="margin-top:16px">
+        <h3><label for="keywords">Unknown alphabet?</label></h3>
+        <textarea id="keywords" rows="6" spellcheck="false" placeholder="One candidate keyword per line" style="width:100%;font:13px/1.4 var(--mono);background:var(--sheet);border:1px solid var(--rule);border-radius:4px;padding:6px 8px;text-transform:uppercase"></textarea>
+        <p class="note">Each word is tried as the alphabet keyword. A few thousand words take about a minute; texts over 150 letters work best.</p>
+      </div>
     </aside>
   </section>
 </main>
@@ -476,7 +481,7 @@ $('#known-results').addEventListener('click', (e) => {
 $('#vig-run').addEventListener('click', () => {
   const btn = $('#vig-run'); btn.disabled = true;
   $('#vig-results').innerHTML = '<p class="empty">Solving…</p>';
-  fetch(`/api/vigenere?text=${encodeURIComponent($('#cipher').value)}&alphabets=${encodeURIComponent($('#alphabets').value)}&max_period=${$('#maxp').value}`)
+  fetch(`/api/vigenere?text=${encodeURIComponent($('#cipher').value)}&alphabets=${encodeURIComponent($('#alphabets').value)}&max_period=${$('#maxp').value}&keywords=${encodeURIComponent($('#keywords').value)}`)
     .then((r) => r.json()).then((d) => {
       $('#vig-time').textContent = `${d.secs.toFixed(2)} s`;
       $('#vig-results').innerHTML = d.results.map((r, k) => `<div class="result"><header><strong>${k === 0 ? 'Best' : '#' + (k + 1)}: key ${r.key}</strong>
