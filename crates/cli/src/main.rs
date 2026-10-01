@@ -18,6 +18,8 @@ USAGE:
   cryptok serve  [--model FILE] [--sources DIR_OR_FILE,...] [--port 8077] [--no-open]
                  (web UI in your browser)
   cryptok train  [--corpus DIR] [--order N] [--out FILE] [--exclude a.txt,b.txt]
+  cryptok eval   [--model FILE] [--corpus DIR] --files a.txt,b.txt
+                 (held-out cross-entropy in bits per letter; lower is better)
   cryptok score  [--model FILE] TEXT...
   cryptok rkc    [--model FILE] [--beam N] [--results N] [--threads N]
                  [--key-hint HINT] [--plain-hint HINT] [--quiet] CIPHER...
@@ -89,6 +91,7 @@ fn main() -> ExitCode {
     }
     let res = match argv[0].as_str() {
         "train" => parse(&argv[1..]).and_then(|a| cmd_train(&a)),
+        "eval" => parse(&argv[1..]).and_then(|a| cmd_eval(&a)),
         "score" => parse(&argv[1..]).and_then(|a| cmd_score(&a)),
         "rkc" => parse(&argv[1..]).and_then(|a| cmd_rkc(&a)),
         "serve" => parse(&argv[1..]).and_then(|a| cmd_serve(&a)),
@@ -133,6 +136,27 @@ fn cmd_train(a: &Args) -> Result<(), String> {
     println!("contexts per level: {:?}", st.contexts_per_level);
     println!("discounts: {:?}", st.discounts.iter().map(|d| (d * 1000.0).round() / 1000.0).collect::<Vec<_>>());
     println!("wrote {} ({:.1} MB)", out.display(), size as f64 / 1e6);
+    Ok(())
+}
+
+fn cmd_eval(a: &Args) -> Result<(), String> {
+    let lm = load_model(a)?;
+    let corpus = PathBuf::from(a.get("corpus", "corpus"));
+    let mut total = 0f64;
+    let mut letters = 0usize;
+    for f in a.get("files", "").split(',').filter(|s| !s.is_empty()) {
+        let b = std::fs::read(corpus.join(f)).map_err(|e| format!("{f}: {e}"))?;
+        let l = scrub(strip_gutenberg(&String::from_utf8_lossy(&b)));
+        // Score in 1,000-letter chunks (the model starts each chunk without context).
+        for ch in l.chunks(1000) {
+            total += lm.score(ch) as f64;
+            letters += ch.len();
+        }
+    }
+    if letters == 0 {
+        return Err("no letters to evaluate (use --files)".into());
+    }
+    println!("{letters} letters, {:.4} bits/letter", -total / letters as f64 / std::f64::consts::LN_2);
     Ok(())
 }
 
