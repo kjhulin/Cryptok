@@ -24,8 +24,9 @@ USAGE:
   cryptok crib   [--model FILE] [--results N] --word WORD CIPHER...
   cryptok known  [--model FILE] [--sources DIR_OR_FILE,...] [--window N] [--results N] CIPHER...
                  (slide known texts along the cipher as candidate running keys)
-  cryptok vigenere [--model FILE] [--alphabet KW1,KW2,...] [--max-period N] [--restarts N]
-                 [--results N] TEXT...
+  cryptok vigenere [--model FILE] [--alphabet KW1,KW2,...] [--alphabet-file FILE]
+                 [--max-period N] [--restarts N] [--results N] TEXT...
+                 (--alphabet-file: one candidate alphabet keyword per line; each is tried)
   cryptok bench gen [--corpus DIR] --holdout a.txt,b.txt [--out FILE] [--seed N] [--per-length N]
   cryptok bench run [--model FILE] [--cases FILE] [--beam N] [--threads N]
 
@@ -218,9 +219,26 @@ fn cmd_vigenere(a: &Args) -> Result<(), String> {
         let alpha = cryptok_core::classic::Alphabet::from_keyword(kw);
         all.extend(cryptok_core::classic::solve_vigenere_with(&lm, &q, &cipher, &alpha, max_period, restarts).into_iter().take(results));
     }
+    if let Some(f) = a.flags.get("alphabet-file") {
+        let words: Vec<String> = std::fs::read_to_string(f)
+            .map_err(|e| format!("{f}: {e}"))?
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty() && l.chars().all(|c| c.is_ascii_alphabetic()))
+            .collect();
+        let t2 = Instant::now();
+        let (ranked, sols) = cryptok_core::classic::solve_vigenere_keyword_search(&lm, &cipher, &words, max_period, 5);
+        eprintln!(
+            "ranked {} keywords in {:.1}s; best alphabets: {}",
+            words.len(),
+            t2.elapsed().as_secs_f64(),
+            ranked.iter().map(|h| h.keyword.as_str()).collect::<Vec<_>>().join(", ")
+        );
+        all.extend(sols);
+    }
     let pen = 26f32.ln();
     all.sort_by(|x, y| (y.score - y.period as f32 * pen).total_cmp(&(x.score - x.period as f32 * pen)));
-    println!("searched periods 1..={max_period} over {} alphabet(s) in {:.2}s", alphabets.len(), t.elapsed().as_secs_f64());
+    println!("searched periods 1..={max_period} in {:.2}s", t.elapsed().as_secs_f64());
     for (i, s) in all.iter().take(results).enumerate() {
         println!("[{}] period {:>2}  key {:<20} alphabet {}  {:.3}/letter", i + 1, s.period, unscrub(&s.key), s.alphabet, s.per_letter());
         println!("    {}", relayout(&original, &s.plain).replace('\n', "\n    "));

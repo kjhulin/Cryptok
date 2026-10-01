@@ -1,7 +1,7 @@
 //! Regression tests on real puzzles. They need a trained model at the workspace root
 //! (`cryptok train`); without it they are skipped.
 
-use cryptok_core::classic::{solve_vigenere, Alphabet};
+use cryptok_core::classic::{solve_vigenere, solve_vigenere_keyword_search, Alphabet};
 use cryptok_core::known::{self, KnownOptions};
 use cryptok_core::lm::LangModel;
 use cryptok_core::text::{scrub, unscrub};
@@ -41,4 +41,22 @@ fn dc23_known_source() {
     let hits = known::search(&lm, &quad, &c, &sources, &KnownOptions::default(), None, None);
     assert_eq!(hits[0].source, "11.txt");
     assert_eq!(unscrub(&hits[0].plain), "FORTUNATEISTHEREDSHIRTENGINEERWHOLIVEPHR");
+}
+
+#[test]
+fn kryptos_k2_unknown_alphabet() {
+    let Some(lm) = model() else { return };
+    // KRYPTOS hidden among ~300 dictionary words.
+    let mut words: Vec<String> = std::fs::read_to_string(root().join("data/words.txt"))
+        .unwrap()
+        .lines()
+        .filter(|w| (5..=10).contains(&w.len()) && w.chars().all(|c| c.is_ascii_alphabetic()))
+        .step_by(1000)
+        .map(String::from)
+        .collect();
+    words.insert(words.len() / 2, "KRYPTOS".into());
+    let c = scrub(&std::fs::read_to_string(root().join("bench/kryptos/k2.txt")).unwrap());
+    let (ranked, sols) = solve_vigenere_keyword_search(&lm, &c, &words, 20, 3);
+    assert_eq!(ranked[0].keyword, "KRYPTOS");
+    assert_eq!(unscrub(&sols[0].key), "ABSCISSA");
 }

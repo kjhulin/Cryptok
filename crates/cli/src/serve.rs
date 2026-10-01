@@ -222,6 +222,15 @@ fn handle(stream: TcpStream, st: &ServerState) -> std::io::Result<()> {
                 let a = Alphabet::from_keyword(kw.trim());
                 all.extend(classic::solve_vigenere_with(&st.lm, &q, &cipher, &a, req.num("max_period", 20), 30).into_iter().take(3));
             }
+            let words: Vec<String> = req
+                .q("keywords")
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .filter(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_alphabetic()))
+                .map(String::from)
+                .collect();
+            if !words.is_empty() {
+                all.extend(classic::solve_vigenere_keyword_search(&st.lm, &cipher, &words, req.num("max_period", 20), 5).1);
+            }
             let pen = 26f32.ln();
             all.sort_by(|x, y| (y.score - y.period as f32 * pen).total_cmp(&(x.score - x.period as f32 * pen)));
             let items: Vec<String> = all
