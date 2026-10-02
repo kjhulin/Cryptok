@@ -18,7 +18,9 @@ Cryptok Code Cracker 2.0
 
 USAGE:
   cryptok serve  [--model FILE] [--sources DIR_OR_FILE,...] [--port 8077] [--host 127.0.0.1] [--no-open]
-                 (web UI in your browser; --host 0.0.0.0 lets a phone on your network open it)
+                 (web UI in your browser. Any --host other than localhost requires CRYPTOK_AUTH=user:password
+                  and sets conservative limits; see docs/DEPLOY-AWS.md. Tuning: --allowed-host a.com,b.com
+                  --max-conns --max-jobs --job-timeout SECS --max-letters --max-beam --max-keywords)
   cryptok train  [--corpus DIR] [--order N] [--out FILE] [--exclude a.txt,b.txt]
   cryptok eval   [--model FILE] [--corpus DIR] --files a.txt,b.txt
                  (held-out cross-entropy in bits per letter; lower is better)
@@ -83,7 +85,7 @@ struct Args {
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
-    const SWITCHES: &[&str] = &["quiet", "help", "no-open", "double", "exhaustive", "verbose", "digits", "raw"];
+    const SWITCHES: &[&str] = &["quiet", "help", "no-open", "double", "exhaustive", "verbose", "digits", "raw", "insecure-no-auth"];
     let mut a = Args { flags: HashMap::new(), switches: vec![], pos: vec![] };
     let mut i = 0;
     while i < args.len() {
@@ -603,7 +605,7 @@ fn cmd_contest_run(a: &Args) -> Result<(), String> {
 fn cmd_ocr(a: &Args) -> Result<(), String> {
     let path = a.pos.first().ok_or("usage: cryptok ocr [--psm N] [--digits] IMAGE")?;
     let opt = ocr::OcrOptions { psm: a.num("psm", 6)? as u32, allow_digits: a.has("digits"), lang: a.get("lang", "eng") };
-    let r = ocr::ocr_file(Path::new(path), &opt)?;
+    let r = ocr::ocr_file(Path::new(path), &opt).map_err(|e| e.to_string())?;
     if a.has("raw") {
         println!("{}", r.raw.trim_end());
         return Ok(());
@@ -627,12 +629,42 @@ fn cmd_serve(a: &Args) -> Result<(), String> {
     let sources = cryptok_core::known::load_sources(&paths).map_err(|e| e.to_string())?;
     eprintln!("loaded {} known-text sources", sources.len());
     let quad = lm.dense(4.min(lm.order() + 1));
+    let host = a.get("host", "127.0.0.1");
     let port = a.num("port", 8077)? as u16;
     let words = word_setup(a, "")?.map(|w| (w.model, w.trie, w.weight));
     let ocr = ocr::tesseract_available();
     eprintln!("{}", if ocr { "OCR: tesseract found (image upload uses it)" } else { "OCR: tesseract not installed; the browser will use Tesseract.js instead (needs internet)" });
-    let state = serve::ServerState { lm, quad, sources, model_path: a.get("model", "cryptok.cklm"), words, ocr };
-    serve::run(state, &a.get("host", "127.0.0.1"), port, !a.has("no-open"))
+
+    let mut cfg = serve::Config::for_host(&host, port);
+    // Credentials: --auth user:password, or better the CRYPTOK_AUTH environment variable
+    // (command lines are visible to other users in `ps`).
+    let auth = a.flags.get("auth").cloned().or_else(|| std::env::var("CRYPTOK_AUTH").ok().filter(|s| !s.is_empty()));
+    if let Some(cred) = auth {
+        let (u, p) = cred.split_once(':').ok_or("--auth / CRYPTOK_AUTH must look like user:password")?;
+        if u.is_empty() || p.len() < 12 {
+            return Err("the password must be at least 12 characters (set CRYPTOK_AUTH=user:password)".into());
+        }
+        cfg.auth = Some((u.to_string(), p.to_string()));
+    }
+    if !serve::is_loopback(&host) && cfg.auth.is_none() && !a.has("insecure-no-auth") {
+        return Err(format!(
+            "refusing to listen on {host} without authentication: anyone who can reach the port could use the server. \
+             Set CRYPTOK_AUTH=user:password (see docs/DEPLOY-AWS.md), or pass --insecure-no-auth if something in front of the server already authenticates."
+        ));
+    }
+    if let Some(h) = a.flags.get("allowed-host") {
+        cfg.allowed_hosts = h.split(',').map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()).collect();
+    }
+    cfg.max_conns = a.num("max-conns", cfg.max_conns)?;
+    cfg.max_jobs = a.num("max-jobs", cfg.max_jobs)?.max(1);
+    cfg.job_timeout = std::time::Duration::from_secs(a.num("job-timeout", cfg.job_timeout.as_secs() as usize)? as u64);
+    cfg.max_letters = a.num("max-letters", cfg.max_letters)?;
+    cfg.max_beam = a.num("max-beam", cfg.max_beam)?;
+    cfg.max_keywords = a.num("max-keywords", cfg.max_keywords)?;
+    cfg.tmp_dir = ocr::private_temp_dir().map_err(|e| format!("cannot create a private upload directory: {e}"))?;
+
+    let state = serve::ServerState::new(lm, quad, sources, a.get("model", "cryptok.cklm"), words, ocr, cfg);
+    serve::run(state, !a.has("no-open"))
 }
 
 fn cmd_crib(a: &Args) -> Result<(), String> {

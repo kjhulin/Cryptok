@@ -375,7 +375,9 @@ impl DenseNgram {
         for &c in &s[end + 1 - self.n..=end] {
             idx = idx * 26 + c as usize;
         }
-        unsafe { *self.t.get_unchecked(idx) }
+        // Bounds-checked: callers pass scrubbed letters (0..26), but this must stay memory-safe
+        // even for out-of-range input.
+        self.t[idx]
     }
 
     /// Value at a base-26 packed index (first letter most significant).

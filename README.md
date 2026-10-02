@@ -20,7 +20,7 @@ cryptok train          # once: learns corpus/ -> cryptok.cklm (~5 s, ~95 MB)
 cryptok serve          # opens the web UI at http://127.0.0.1:8077/
 ```
 
-**Reading ciphertext from a picture.** Under the ciphertext box, *Scan image…* reads an uploaded picture or scan (you can also drop or paste one), *Take photo* opens a phone's camera, and *Use webcam* takes a still from a computer camera. The recognised text lands in the ciphertext box with the picture beside it; check it before solving, because one misread letter shifts every key and crib (I/J, O/Q and U/V are the usual culprits, and clean, well-lit, straight-on shots work far better than angled photos). OCR uses the `tesseract` program when it is installed (`apt install tesseract-ocr`, `brew install tesseract`, or the Windows installer), otherwise the browser falls back to Tesseract.js, which needs internet the first time. Choose *One line* or *Scattered text* if a block layout misreads. From the command line: `cryptok ocr photo.jpg`, e.g. `cryptok analyze $(cryptok ocr photo.jpg)`. To use a phone on your network, start `cryptok serve --host 0.0.0.0` (anyone on that network can then use the server, so only do this on one you trust); browsers only allow the live webcam on localhost or https, but *Take photo* works over plain http.
+**Reading ciphertext from a picture.** Under the ciphertext box, *Scan image…* reads an uploaded picture or scan (you can also drop or paste one), *Take photo* opens a phone's camera, and *Use webcam* takes a still from a computer camera. The recognised text lands in the ciphertext box with the picture beside it; check it before solving, because one misread letter shifts every key and crib (I/J, O/Q and U/V are the usual culprits, and clean, well-lit, straight-on shots work far better than angled photos). OCR uses the `tesseract` program when it is installed (`apt install tesseract-ocr`, `brew install tesseract`, or the Windows installer), otherwise the browser falls back to Tesseract.js, which needs internet the first time. Choose *One line* or *Scattered text* if a block layout misreads. From the command line: `cryptok ocr photo.jpg`, e.g. `cryptok analyze $(cryptok ocr photo.jpg)`. To use a phone on your network, start `CRYPTOK_AUTH=user:a-long-password cryptok serve --host 0.0.0.0` (the server refuses to listen beyond localhost without a login); browsers only allow the live webcam on localhost or https, but *Take photo* works over plain http.
 
 The web UI has three tabs:
 
@@ -55,6 +55,10 @@ cryptok playfair CIPHER
 ### Measuring performance on contest ciphers
 
 `cryptok contest run` runs the analyser and every plausible solver automatically on each cipher in `bench/contests.tsv`, ranks the attempts by description length (plaintext fluency minus the cost of the key), and scores the winner against the known plaintext. `--verbose` lists every attempt, `--exhaustive` ignores the analyser's pruning, `--out FILE` saves a results table (the last baseline is `bench/contest-results.tsv`). The file holds DEF CON 20 and 23, Kryptos K1-K3 and ten synthetic contest-style puzzles (`bench/gen_synthetic.py`); add other contests as new rows. Only ciphertexts with a published solution belong there.
+
+### Deploying
+
+Listening on anything but localhost needs `CRYPTOK_AUTH`, applies conservative request, time and size limits, checks the `Host` header, and sends a strict content-security policy. Put it behind a TLS-terminating proxy: see [docs/DEPLOY-AWS.md](docs/DEPLOY-AWS.md) (with a `Dockerfile`) and the audit in [SECURITY.md](SECURITY.md).
 
 ### Command line
 

@@ -270,6 +270,8 @@ pre.plain { white-space: pre-wrap; word-break: break-all; font: 14px/1.6 var(--m
 
 <script>
 const $ = (s) => document.querySelector(s);
+// Everything that reaches innerHTML from the server or the user goes through esc().
+const esc = (v) => String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const L = (i) => String.fromCharCode(65 + i);
 const mod = (x) => ((x % 26) + 26) % 26;
 
@@ -457,7 +459,7 @@ async function startCam(deviceId) {
   $('#cam').hidden = false;
   const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
   const sel = $('#cam-sel');
-  sel.innerHTML = cams.map((d, i) => `<option value="${d.deviceId}">${(d.label || 'Camera ' + (i + 1)).replace(/[<&]/g, '')}</option>`).join('');
+  sel.replaceChildren(...cams.map((d, i) => Object.assign(document.createElement('option'), { value: d.deviceId, textContent: d.label || 'Camera ' + (i + 1) })));
   sel.hidden = cams.length < 2;
   const cur = scan.stream.getVideoTracks()[0]?.getSettings().deviceId;
   if (cur) sel.value = cur;
@@ -628,7 +630,7 @@ $('#solve').addEventListener('click', () => {
       state.liveBest = p.best.slice(0, 1); renderResults();
     },
     (d) => {
-      if (d.error) { $('#rkc-results').innerHTML = `<p class="err">${d.error}</p>`; return; }
+      if (d.error) { $('#rkc-results').innerHTML = `<p class="err">${esc(d.error)}</p>`; return; }
       state.results = d.results; state.liveBest = null;
       $('#rkc-time').textContent = `${d.secs.toFixed(2)} s`;
       renderResults();
@@ -643,7 +645,7 @@ $('#crib-form').addEventListener('submit', (e) => {
   const word = $('#crib').value.toUpperCase().replace(/[^A-Z]/g, '');
   if (!word || !state.letters.length) return;
   fetch(`/api/crib?cipher=${encodeURIComponent($('#cipher').value)}&word=${word}`).then((r) => r.json()).then((hits) => {
-    $('#crib-list').innerHTML = hits.map((h) => `<li><span class="pos">${h.pos + 1}</span><span>${h.other}</span>
+    $('#crib-list').innerHTML = hits.map((h) => `<li><span class="pos">${h.pos + 1}</span><span>${esc(h.other)}</span>
       <span><button class="quiet" data-pos="${h.pos}" data-as="a" title="Put ${word} in row A">A</button>
       <button class="quiet" data-pos="${h.pos}" data-as="b" title="Put ${word} in row B">B</button></span></li>`).join('')
       || '<li>No room for that word.</li>';
@@ -667,7 +669,7 @@ $('#known-run').addEventListener('click', () => {
   stream(`/api/known?cipher=${encodeURIComponent($('#cipher').value)}`,
     (p) => { $('#known-prog').style.width = p.pct + '%'; },
     (d) => {
-      if (d.error) { $('#known-results').innerHTML = `<p class="err">${d.error}</p>`; return; }
+      if (d.error) { $('#known-results').innerHTML = `<p class="err">${esc(d.error)}</p>`; return; }
       $('#known-time').textContent = `${d.secs.toFixed(2)} s`;
       const n = state.letters.length, per = perLine($('#known-results'));
       $('#known-results').innerHTML = d.results.map((h, k) => {
@@ -679,7 +681,7 @@ $('#known-run').addEventListener('click', () => {
           const sp = (str) => [...str.slice(s, e)].map((c) => `<span>${c}</span>`).join('');
           lines += `<div class="line"><div class="idx">${s + 1}</div><div class="rows"><div class="row a">${sp(ka)}</div><div class="row b">${sp(kb)}</div></div></div>`;
         }
-        return `<div class="result" data-k="${k}"><header><strong>${h.source}</strong>
+        return `<div class="result" data-k="${k}"><header><strong>${esc(h.source)}</strong>
           <span class="score">from letter ${h.offset}, reads as English in ${(h.coverage * 100).toFixed(0)}% of positions</span>
           <button class="quiet use-known">Pin as hints</button></header>${lines}</div>`;
       }).join('') || '<p class="empty">No source lines up with this cipher.</p>';
@@ -701,10 +703,11 @@ $('#vig-run').addEventListener('click', () => {
   $('#vig-results').innerHTML = '<p class="empty">Solving…</p>';
   fetch(`/api/vigenere?text=${encodeURIComponent($('#cipher').value)}&alphabets=${encodeURIComponent($('#alphabets').value)}&max_period=${$('#maxp').value}&keywords=${encodeURIComponent($('#keywords').value)}`)
     .then((r) => r.json()).then((d) => {
+      if (d.error) { $('#vig-results').innerHTML = `<p class="err">${esc(d.error)}</p>`; return; }
       $('#vig-time').textContent = `${d.secs.toFixed(2)} s`;
-      $('#vig-results').innerHTML = d.results.map((r, k) => `<div class="result"><header><strong>${k === 0 ? 'Best' : '#' + (k + 1)}: key ${r.key}</strong>
-        <span class="score">length ${r.period}, alphabet ${r.alphabet}, ${r.per_letter.toFixed(3)} per letter</span></header>
-        <pre class="plain">${r.plain.replace(/[<&]/g, (c) => c === '<' ? '&lt;' : '&amp;')}</pre></div>`).join('');
+      $('#vig-results').innerHTML = d.results.map((r, k) => `<div class="result"><header><strong>${k === 0 ? 'Best' : '#' + (k + 1)}: key ${esc(r.key)}</strong>
+        <span class="score">length ${r.period}, alphabet ${esc(r.alphabet)}, ${r.per_letter.toFixed(3)} per letter</span></header>
+        <pre class="plain">${esc(r.plain)}</pre></div>`).join('');
     }).finally(() => { btn.disabled = false; });
 });
 
@@ -713,10 +716,11 @@ $('#trans-run').addEventListener('click', () => {
   const btn = $('#trans-run'); btn.disabled = true;
   $('#trans-results').innerHTML = '<p class="empty">Solving…</p>';
   fetch(`/api/transpose?text=${encodeURIComponent($('#cipher').value)}`).then((r) => r.json()).then((d) => {
+    if (d.error) { $('#trans-results').innerHTML = `<p class="err">${esc(d.error)}</p>`; return; }
     $('#trans-time').textContent = `${d.secs.toFixed(2)} s`;
     $('#trans-results').innerHTML = d.results.map((r, k) => `<div class="result"><header><strong>${k === 0 ? 'Best' : '#' + (k + 1)}</strong>
-      <span class="score">${r.method}, ${r.per_letter.toFixed(3)} per letter</span></header>
-      <pre class="plain">${r.text.replace(/[<&]/g, (c) => c === '<' ? '&lt;' : '&amp;')}</pre></div>`).join('') || '<p class="empty">Need at least 8 letters.</p>';
+      <span class="score">${esc(r.method)}, ${r.per_letter.toFixed(3)} per letter</span></header>
+      <pre class="plain">${esc(r.text)}</pre></div>`).join('') || '<p class="empty">Need at least 8 letters.</p>';
   }).finally(() => { btn.disabled = false; });
 });
 
