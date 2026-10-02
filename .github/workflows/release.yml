@@ -41,7 +41,7 @@ jobs:
           cp target/release/${{ matrix.exe }} README.md LICENSE.txt "$d"/
           cp -r corpus data "$d"/
           if [ "${{ runner.os }}" = "Windows" ]; then 7z a "$d.zip" "$d"; else tar czf "$d.tar.gz" "$d"; fi
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: cryptok-${{ matrix.name }}
           path: cryptok-${{ matrix.name }}.*
@@ -53,7 +53,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo run --release -- train --out cryptok.cklm
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: cryptok-model
           path: cryptok.cklm
