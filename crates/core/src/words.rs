@@ -9,7 +9,7 @@ use crate::map::FxHashMap;
 use crate::text::{strip_gutenberg, unscrub};
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const MAX_WORD: usize = 24;
 /// Cost (nats) of an out-of-vocabulary stretch: `OOV_BASE + OOV_PER_LETTER * len`.
@@ -45,21 +45,17 @@ impl Segmentation {
 pub struct WordModel {
     /// Letter sequence (0..26) -> natural-log probability.
     logp: FxHashMap<Vec<u8>, f32>,
+    /// Kept vocabulary with raw counts (what [`WordModel::save`] writes).
+    counts: Vec<(Vec<u8>, u32)>,
     max_len: usize,
 }
 
 impl WordModel {
     /// Build from raw text files in `dir` (Gutenberg boilerplate stripped), skipping
     /// the file names in `exclude`. Words seen fewer than `min_count` times are dropped.
-    pub fn from_corpus(dir: &Path, exclude: &[String], min_count: u32) -> io::Result<Self> {
+    pub fn from_corpus(dirs: &[PathBuf], exclude: &[String], min_count: u32) -> io::Result<Self> {
         let mut counts: FxHashMap<Vec<u8>, u32> = FxHashMap::default();
-        let mut names: Vec<_> = fs::read_dir(dir)?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.is_file())
-            .filter(|p| !exclude.iter().any(|x| *x == p.file_name().unwrap().to_string_lossy()))
-            .collect();
-        names.sort();
+        let names = crate::text::corpus_files(dirs, exclude)?;
         for p in names {
             let bytes = fs::read(&p)?;
             let text = String::from_utf8_lossy(&bytes);
@@ -77,8 +73,39 @@ impl WordModel {
             .collect();
         let total: f64 = kept.iter().map(|(_, c)| *c as f64).sum::<f64>().max(1.0);
         let max_len = kept.iter().map(|(w, _)| w.len()).max().unwrap_or(1);
-        let logp = kept.into_iter().map(|(w, c)| (w, ((c as f64) / total).ln() as f32)).collect();
-        WordModel { logp, max_len }
+        let logp = kept.iter().map(|(w, c)| (w.clone(), ((*c as f64) / total).ln() as f32)).collect();
+        WordModel { logp, counts: kept, max_len }
+    }
+
+    /// Write the vocabulary as `word<TAB>count` lines (plain text, ~1 MB).
+    pub fn save(&self, path: &Path) -> io::Result<()> {
+        let mut rows: Vec<&(Vec<u8>, u32)> = self.counts.iter().collect();
+        rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let mut out = String::from("#cryptok-words v1\n");
+        for (w, c) in rows {
+            out.push_str(&unscrub(w).to_lowercase());
+            out.push('\t');
+            out.push_str(&c.to_string());
+            out.push('\n');
+        }
+        fs::write(path, out)
+    }
+
+    pub fn load(path: &Path) -> io::Result<Self> {
+        let text = fs::read_to_string(path)?;
+        let mut lines = text.lines();
+        if lines.next() != Some("#cryptok-words v1") {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "not a cryptok word list"));
+        }
+        let mut counts: FxHashMap<Vec<u8>, u32> = FxHashMap::default();
+        for l in lines {
+            if let Some((w, c)) = l.split_once('\t') {
+                if let Ok(c) = c.parse::<u32>() {
+                    counts.insert(crate::text::scrub(w), c);
+                }
+            }
+        }
+        Ok(Self::from_counts(counts, 1))
     }
 
     pub fn vocab_size(&self) -> usize {
@@ -281,6 +308,18 @@ mod tests {
             c.insert(scrub(w), n);
         }
         WordModel::from_counts(c, 1)
+    }
+
+    #[test]
+    fn save_and_load_round_trip() {
+        let m = model();
+        let p = std::env::temp_dir().join(format!("cryptok-words-test-{}.txt", std::process::id()));
+        m.save(&p).unwrap();
+        let l = WordModel::load(&p).unwrap();
+        std::fs::remove_file(&p).ok();
+        let s = scrub("FORTUNATEISTHEREDSHIRT");
+        assert_eq!(l.vocab_size(), m.vocab_size());
+        assert!((l.segment(&s).score - m.segment(&s).score).abs() < 1e-3);
     }
 
     #[test]

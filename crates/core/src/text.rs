@@ -89,3 +89,19 @@ mod tests {
         }
     }
 }
+
+/// All regular files in the given directories (sorted by path), skipping the file names in `exclude`.
+pub fn corpus_files(dirs: &[std::path::PathBuf], exclude: &[String]) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let mut names = vec![];
+    for dir in dirs {
+        for e in std::fs::read_dir(dir)? {
+            let p = e?.path();
+            let n = p.file_name().unwrap().to_string_lossy().to_string();
+            if p.is_file() && !exclude.contains(&n) {
+                names.push(p);
+            }
+        }
+    }
+    names.sort();
+    Ok(names)
+}
