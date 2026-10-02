@@ -58,7 +58,7 @@ cryptok playfair CIPHER
 
 ### Deploying
 
-Listening on anything but localhost needs `CRYPTOK_AUTH`, applies conservative request, time and size limits, checks the `Host` header, and sends a strict content-security policy. Put it behind a TLS-terminating proxy: see [docs/DEPLOY-AWS.md](docs/DEPLOY-AWS.md) (with a `Dockerfile`) and the audit in [SECURITY.md](SECURITY.md).
+Listening on anything but localhost needs `CRYPTOK_AUTH`, applies conservative request, time and size limits, checks the `Host` header, and sends a strict content-security policy. Put it behind a TLS-terminating proxy: see [docs/DEPLOY-AWS.md](docs/DEPLOY-AWS.md) (with a `Dockerfile`) or, for nginx at a sub-path with Google sign-in, [docs/NGINX-SSO.md](docs/NGINX-SSO.md) and the audit in [SECURITY.md](SECURITY.md).
 
 ### Command line
 

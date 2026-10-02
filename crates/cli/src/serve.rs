@@ -29,6 +29,9 @@ const INDEX_HTML: &str = include_str!("../ui/index.html");
 /// conservative when the server is reachable from a network.
 #[derive(Clone)]
 pub struct Config {
+    /// Reachable by untrusted clients (non-loopback bind, or `--public` behind a proxy):
+    /// conservative limits and request logging.
+    pub public: bool,
     pub host: String,
     pub port: u16,
     /// `(user, password)` for HTTP Basic authentication.
@@ -53,9 +56,12 @@ pub fn is_loopback(host: &str) -> bool {
 }
 
 impl Config {
-    pub fn for_host(host: &str, port: u16) -> Self {
-        let local = is_loopback(host);
+    /// `public` forces the conservative profile even on a loopback bind: use it behind a
+    /// reverse proxy on the same machine.
+    pub fn for_host(host: &str, port: u16, public: bool) -> Self {
+        let local = is_loopback(host) && !public;
         Config {
+            public: !local,
             host: host.to_string(),
             port,
             auth: None,
@@ -124,14 +130,15 @@ impl Drop for Slot {
 pub fn run(state: ServerState, open: bool) -> Result<(), String> {
     let (host, port) = (state.cfg.host.clone(), state.cfg.port);
     let listener = TcpListener::bind((host.as_str(), port)).map_err(|e| format!("cannot listen on {host}:{port}: {e}"))?;
-    let local = is_loopback(&host);
-    let url = format!("http://{}:{port}/", if local { "127.0.0.1" } else { host.as_str() });
+    let local = !state.cfg.public;
+    let url = format!("http://{}:{port}/", if is_loopback(&host) { "127.0.0.1" } else { host.as_str() });
     println!("Cryptok Code Cracker is running at {url}  (Ctrl-C to stop)");
     if !local {
         eprintln!(
-            "note: listening on {host}. This server speaks plain HTTP: put a TLS-terminating proxy (for example an AWS load balancer) in front of it. \
-             Authentication: {}.",
-            if state.cfg.auth.is_some() { "HTTP Basic (enabled)" } else { "DISABLED" }
+            "note: public mode on {host}. This server speaks plain HTTP: put a TLS-terminating proxy (nginx, an AWS load balancer) in front of it. \
+             Authentication here: {}. Host allow-list: {}.",
+            if state.cfg.auth.is_some() { "HTTP Basic (enabled)" } else { "none (the proxy must authenticate)" },
+            if state.cfg.allowed_hosts.is_empty() { "any".to_string() } else { state.cfg.allowed_hosts.join(", ") }
         );
     }
     if open {
@@ -188,6 +195,8 @@ struct Request {
     host: String,
     authorization: String,
     forwarded_for: String,
+    /// `X-Auth-Request-Email` set by a trusted SSO proxy; used only for the request log.
+    user: String,
     body: Vec<u8>,
 }
 
@@ -220,7 +229,7 @@ fn read_request(stream: &TcpStream) -> Result<Option<Request>, Refusal> {
     let mut r = BufReader::new(stream);
     let Some(line) = read_line_limited(&mut r, MAX_REQUEST_LINE, ("414 URI Too Long", "request line too long"))? else { return Ok(None) };
     let (mut content_length, mut custom_header) = (None::<usize>, false);
-    let (mut host, mut authorization, mut forwarded_for) = (String::new(), String::new(), String::new());
+    let (mut host, mut authorization, mut forwarded_for, mut user) = (String::new(), String::new(), String::new(), String::new());
     for count in 0.. {
         let Some(h) = read_line_limited(&mut r, MAX_HEADER_LINE, ("431 Request Header Fields Too Large", "header too long"))? else { break };
         if h == "\r\n" || h == "\n" {
@@ -245,6 +254,7 @@ fn read_request(stream: &TcpStream) -> Result<Option<Request>, Refusal> {
             "host" => host = v.to_string(),
             "authorization" => authorization = v.to_string(),
             "x-forwarded-for" => forwarded_for = v.to_string(),
+            "x-auth-request-email" => user = v.to_string(),
             _ => {}
         }
     }
@@ -284,7 +294,7 @@ fn read_request(stream: &TcpStream) -> Result<Option<Request>, Refusal> {
         }
         _ => return Err(("405 Method Not Allowed", "GET only")),
     }
-    Ok(Some(Request { method, path: path.to_string(), query, custom_header, host, authorization, forwarded_for, body }))
+    Ok(Some(Request { method, path: path.to_string(), query, custom_header, host, authorization, forwarded_for, user, body }))
 }
 
 fn url_decode(s: &str) -> String {
@@ -591,9 +601,11 @@ fn handle(stream: TcpStream, st: &ServerState) -> std::io::Result<()> {
         std::thread::sleep(Duration::from_millis(300)); // slow down guessing
         return respond_with(&stream, "401 Unauthorized", "text/plain", &["WWW-Authenticate: Basic realm=\"cryptok\", charset=\"UTF-8\""], "authentication required");
     }
-    if !is_loopback(&st.cfg.host) {
-        // Request log. The query string is left out: it carries the ciphertext.
-        eprintln!("{} {} {}", client_ip(&stream, &req), req.method, req.path);
+    if st.cfg.public {
+        // Request log. The query string is left out: it carries the ciphertext. `user` is the
+        // identity a trusted proxy's SSO layer vouches for (X-Auth-Request-Email), if any.
+        let user = if req.user.is_empty() { String::new() } else { format!(" user={}", req.user.chars().filter(|c| c.is_ascii_graphic()).take(80).collect::<String>()) };
+        eprintln!("{} {} {}{user}", client_ip(&stream, &req), req.method, req.path);
     }
     if req.method == "POST" && req.path != "/api/ocr" {
         return respond(&stream, "405 Method Not Allowed", "text/plain", "POST is only used for /api/ocr");
@@ -857,7 +869,7 @@ mod tests {
     use std::net::TcpListener;
 
     fn req(host: &str, auth: &str) -> Request {
-        Request { method: "GET".into(), path: "/".into(), query: vec![], custom_header: false, host: host.into(), authorization: auth.into(), forwarded_for: String::new(), body: vec![] }
+        Request { method: "GET".into(), path: "/".into(), query: vec![], custom_header: false, host: host.into(), authorization: auth.into(), forwarded_for: String::new(), user: String::new(), body: vec![] }
     }
 
     #[test]
@@ -873,7 +885,7 @@ mod tests {
 
     #[test]
     fn basic_auth() {
-        let mut cfg = Config::for_host("0.0.0.0", 1);
+        let mut cfg = Config::for_host("0.0.0.0", 1, false);
         assert!(authorised(&cfg, &req("h", ""))); // auth disabled
         cfg.auth = Some(("alice".into(), "secret-password".into()));
         let good = format!("Basic {}", "YWxpY2U6c2VjcmV0LXBhc3N3b3Jk");
@@ -885,7 +897,7 @@ mod tests {
 
     #[test]
     fn host_allow_list() {
-        let local = Config::for_host("127.0.0.1", 1);
+        let local = Config::for_host("127.0.0.1", 1, false);
         for ok in ["localhost", "localhost:8077", "127.0.0.1:8077", "[::1]:8077", "LOCALHOST"] {
             assert!(host_allowed(&local, &req(ok, "")), "{ok}");
         }
@@ -893,7 +905,7 @@ mod tests {
         for bad in ["evil.example", "evil.example:8077", "127.0.0.1.evil.example", ""] {
             assert!(!host_allowed(&local, &req(bad, "")), "{bad}");
         }
-        let mut public = Config::for_host("0.0.0.0", 1);
+        let mut public = Config::for_host("0.0.0.0", 1, false);
         assert!(host_allowed(&public, &req("anything", ""))); // not configured: any
         public.allowed_hosts = vec!["demo.example.com".into()];
         assert!(host_allowed(&public, &req("demo.example.com:443", "")));

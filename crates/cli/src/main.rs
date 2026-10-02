@@ -20,7 +20,9 @@ USAGE:
   cryptok serve  [--model FILE] [--sources DIR_OR_FILE,...] [--port 8077] [--host 127.0.0.1] [--no-open]
                  (web UI in your browser. Any --host other than localhost requires CRYPTOK_AUTH=user:password
                   and sets conservative limits; see docs/DEPLOY-AWS.md. Tuning: --allowed-host a.com,b.com
-                  --max-conns --max-jobs --job-timeout SECS --max-letters --max-beam --max-keywords)
+                  --max-conns --max-jobs --job-timeout SECS --max-letters --max-beam --max-keywords.
+                  --public: keep --host 127.0.0.1 but use the conservative limits, for a reverse proxy
+                  on the same machine that does the authentication; requires --allowed-host. See docs/NGINX-SSO.md)
   cryptok train  [--corpus DIR] [--order N] [--out FILE] [--exclude a.txt,b.txt]
   cryptok eval   [--model FILE] [--corpus DIR] --files a.txt,b.txt
                  (held-out cross-entropy in bits per letter; lower is better)
@@ -85,7 +87,7 @@ struct Args {
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
-    const SWITCHES: &[&str] = &["quiet", "help", "no-open", "double", "exhaustive", "verbose", "digits", "raw", "insecure-no-auth"];
+    const SWITCHES: &[&str] = &["quiet", "help", "no-open", "double", "exhaustive", "verbose", "digits", "raw", "insecure-no-auth", "public"];
     let mut a = Args { flags: HashMap::new(), switches: vec![], pos: vec![] };
     let mut i = 0;
     while i < args.len() {
@@ -635,7 +637,8 @@ fn cmd_serve(a: &Args) -> Result<(), String> {
     let ocr = ocr::tesseract_available();
     eprintln!("{}", if ocr { "OCR: tesseract found (image upload uses it)" } else { "OCR: tesseract not installed; the browser will use Tesseract.js instead (needs internet)" });
 
-    let mut cfg = serve::Config::for_host(&host, port);
+    let public = a.has("public");
+    let mut cfg = serve::Config::for_host(&host, port, public);
     // Credentials: --auth user:password, or better the CRYPTOK_AUTH environment variable
     // (command lines are visible to other users in `ps`).
     let auth = a.flags.get("auth").cloned().or_else(|| std::env::var("CRYPTOK_AUTH").ok().filter(|s| !s.is_empty()));
@@ -646,7 +649,10 @@ fn cmd_serve(a: &Args) -> Result<(), String> {
         }
         cfg.auth = Some((u.to_string(), p.to_string()));
     }
-    if !serve::is_loopback(&host) && cfg.auth.is_none() && !a.has("insecure-no-auth") {
+    if public && !a.flags.contains_key("allowed-host") {
+        return Err("--public needs --allowed-host your.domain (requests with any other Host header are refused)".into());
+    }
+    if cfg.public && !public && cfg.auth.is_none() && !a.has("insecure-no-auth") {
         return Err(format!(
             "refusing to listen on {host} without authentication: anyone who can reach the port could use the server. \
              Set CRYPTOK_AUTH=user:password (see docs/DEPLOY-AWS.md), or pass --insecure-no-auth if something in front of the server already authenticates."

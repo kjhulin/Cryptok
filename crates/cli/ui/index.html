@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cryptok Code Cracker</title>
+<link rel="icon" href="data:,">
 <style>
 :root {
   --film: #e8edef;
@@ -270,6 +271,7 @@ pre.plain { white-space: pre-wrap; word-break: break-all; font: 14px/1.6 var(--m
 
 <script>
 const $ = (s) => document.querySelector(s);
+// API calls use relative URLs so the page works under a path prefix (e.g. https://host/solver/).
 // Everything that reaches innerHTML from the server or the user goes through esc().
 const esc = (v) => String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const L = (i) => String.fromCharCode(65 + i);
@@ -291,7 +293,7 @@ document.querySelectorAll('nav button').forEach((b) => b.addEventListener('click
 }));
 
 // ---------- info
-fetch('/api/info').then((r) => r.json()).then((info) => {
+fetch('api/info').then((r) => r.json()).then((info) => {
   $('#status').textContent = `Order-${info.order} model ready, ${info.threads} cores`;
   $('#sources-note').textContent = `${info.sources.length} texts, ${(info.source_letters / 1e6).toFixed(1)} million letters. ` +
     `Start the server with --sources to add your own (lyrics, speeches, books).`;
@@ -323,7 +325,7 @@ const scan = {
   setStatus(t) { $('#scan-status').textContent = t; },
   info: { ocr: false },
 };
-fetch('/api/info').then((r) => r.json()).then((i) => { scan.info = i; }).catch(() => {});
+fetch('api/info').then((r) => r.json()).then((i) => { scan.info = i; }).catch(() => {});
 
 // Same rules as the server: upper-case letters, keep ? and line breaks, drop other noise.
 function cleanOcr(raw, digits) {
@@ -386,7 +388,7 @@ function loadTesseractJs() {
 
 async function ocrOnServer(cv, psm, digits) {
   const blob = await canvasBlob(cv);
-  const r = await fetch(`/api/ocr?psm=${psm}&digits=${digits ? 1 : 0}`, { method: 'POST', headers: { 'X-Cryptok': '1' }, body: blob });
+  const r = await fetch(`api/ocr?psm=${psm}&digits=${digits ? 1 : 0}`, { method: 'POST', headers: { 'X-Cryptok': '1' }, body: blob });
   const j = await r.json();
   if (!r.ok) throw new Error(j.error || `OCR failed (${r.status})`);
   return { text: j.text, dropped: j.dropped, letters: j.letters, confidence: null };
@@ -623,7 +625,7 @@ $('#solve').addEventListener('click', () => {
   state.results = []; state.liveBest = null; state.showAll = false; renderResults();
   btn.textContent = 'Stop'; btn.classList.add('stop');
   $('#rkc-head').textContent = 'Results';
-  state.running = stream(`/api/rkc?cipher=${encodeURIComponent($('#cipher').value)}&beam=${$('#beam').value}&key=${pins}`,
+  state.running = stream(`api/rkc?cipher=${encodeURIComponent($('#cipher').value)}&beam=${$('#beam').value}&key=${pins}`,
     (p) => {
       $('#rkc-prog').style.width = (100 * p.step / p.total) + '%';
       $('#rkc-time').textContent = `${p.step} / ${p.total}`;
@@ -644,7 +646,7 @@ $('#crib-form').addEventListener('submit', (e) => {
   readCipher();
   const word = $('#crib').value.toUpperCase().replace(/[^A-Z]/g, '');
   if (!word || !state.letters.length) return;
-  fetch(`/api/crib?cipher=${encodeURIComponent($('#cipher').value)}&word=${word}`).then((r) => r.json()).then((hits) => {
+  fetch(`api/crib?cipher=${encodeURIComponent($('#cipher').value)}&word=${word}`).then((r) => r.json()).then((hits) => {
     $('#crib-list').innerHTML = hits.map((h) => `<li><span class="pos">${h.pos + 1}</span><span>${esc(h.other)}</span>
       <span><button class="quiet" data-pos="${h.pos}" data-as="a" title="Put ${word} in row A">A</button>
       <button class="quiet" data-pos="${h.pos}" data-as="b" title="Put ${word} in row B">B</button></span></li>`).join('')
@@ -666,7 +668,7 @@ $('#known-run').addEventListener('click', () => {
   readCipher();
   const t0 = performance.now();
   btn.disabled = true; $('#known-results').innerHTML = '';
-  stream(`/api/known?cipher=${encodeURIComponent($('#cipher').value)}`,
+  stream(`api/known?cipher=${encodeURIComponent($('#cipher').value)}`,
     (p) => { $('#known-prog').style.width = p.pct + '%'; },
     (d) => {
       if (d.error) { $('#known-results').innerHTML = `<p class="err">${esc(d.error)}</p>`; return; }
@@ -701,7 +703,7 @@ $('#known-results').addEventListener('click', (e) => {
 $('#vig-run').addEventListener('click', () => {
   const btn = $('#vig-run'); btn.disabled = true;
   $('#vig-results').innerHTML = '<p class="empty">Solving…</p>';
-  fetch(`/api/vigenere?text=${encodeURIComponent($('#cipher').value)}&alphabets=${encodeURIComponent($('#alphabets').value)}&max_period=${$('#maxp').value}&keywords=${encodeURIComponent($('#keywords').value)}`)
+  fetch(`api/vigenere?text=${encodeURIComponent($('#cipher').value)}&alphabets=${encodeURIComponent($('#alphabets').value)}&max_period=${$('#maxp').value}&keywords=${encodeURIComponent($('#keywords').value)}`)
     .then((r) => r.json()).then((d) => {
       if (d.error) { $('#vig-results').innerHTML = `<p class="err">${esc(d.error)}</p>`; return; }
       $('#vig-time').textContent = `${d.secs.toFixed(2)} s`;
@@ -715,7 +717,7 @@ $('#vig-run').addEventListener('click', () => {
 $('#trans-run').addEventListener('click', () => {
   const btn = $('#trans-run'); btn.disabled = true;
   $('#trans-results').innerHTML = '<p class="empty">Solving…</p>';
-  fetch(`/api/transpose?text=${encodeURIComponent($('#cipher').value)}`).then((r) => r.json()).then((d) => {
+  fetch(`api/transpose?text=${encodeURIComponent($('#cipher').value)}`).then((r) => r.json()).then((d) => {
     if (d.error) { $('#trans-results').innerHTML = `<p class="err">${esc(d.error)}</p>`; return; }
     $('#trans-time').textContent = `${d.secs.toFixed(2)} s`;
     $('#trans-results').innerHTML = d.results.map((r, k) => `<div class="result"><header><strong>${k === 0 ? 'Best' : '#' + (k + 1)}</strong>
