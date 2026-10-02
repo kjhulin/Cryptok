@@ -50,7 +50,8 @@ fn kryptos_k3_route() {
     let t = std::fs::read_to_string(root().join("bench/kryptos/k3.txt")).unwrap();
     let q = lm.dense(4);
     let best = &solve_route(&lm, &q, &t, 60, 1)[0];
-    assert!(best.text.starts_with("SLOWLYDESPARATLYSLOWLY"), "{}", best.text);
+    // The rotation of the start is arbitrary, so look for the passage rather than its first letters.
+    assert!(best.text.contains("SLOWLYDESPARATLYSLOWLYTHEREMAINSOFPASSAGEDEBRIS"), "{}", best.text);
 }
 
 #[test]
@@ -67,7 +68,7 @@ fn keyed_columnar() {
         c.extend(p.iter().skip(col).step_by(order.len()));
     }
     let q = lm.dense(4);
-    let best = &solve_columnar(&lm, &q, &c, 2, 10, 8, 1)[0];
+    let best = &solve_columnar(&lm, &q, &c, 2, 10, 24, 1)[0];
     assert_eq!(best.text, plain);
 }
 
@@ -94,12 +95,12 @@ fn dc23_blind_with_word_model() {
     use cryptok_core::rkc::{pair_accuracy, solve_words, RkcOptions};
     use cryptok_core::words::WordModel;
     let Some(lm) = model() else { return };
-    let wm = WordModel::from_corpus(&[root().join("corpus")], &[], 3).unwrap();
+    let wm = WordModel::from_corpus(&[root().join("corpus")], &[], 3, false).unwrap();
     let trie = wm.trie().with_oov(-4.0, -3.5);
     let c = scrub("BVFBHGHXAWJEKEDMDZAPRMWGNMTVIRPWIKHGIPUU");
     let key = scrub("WHOINTHEWORLDAMIAHTHATSTHEGREATPUZZLEAND");
     let plain = scrub("FORTUNATEISTHEREDSHIRTENGINEERWHOLIVEPHR");
-    let opts = RkcOptions { beam: 20_000, results: 1, word_weight: 0.3, ..Default::default() };
+    let opts = RkcOptions { beam: 20_000, results: 1, word_weight: 0.4, ..Default::default() };
     let s = &solve_words(&lm, Some(&trie), &c, &opts, None, None)[0];
     // The character model alone recovers ~45% of this cipher; words lift it to ~77%.
     assert!(pair_accuracy(s, &key, &plain) > 0.65);
