@@ -80,7 +80,7 @@ What the locations do:
   expires mid-visit, reload the page.
 * `/solver/api/rkc` and `/solver/api/known` are Server-Sent Events: `proxy_buffering off`, so
   progress appears live, and `proxy_read_timeout 180s` outlasts the app's own 120 s limit.
-* `/solver/api/ocr` is the only route allowed a request body (26 MB); everything else is capped at 1 KB.
+* `/solver/api/ocr` is the only route allowed a request body (26 MB); everything else is capped at 1 KB. `proxy_request_buffering off` streams the photo to the app so nginx never writes it to a temporary file (by default nginx spills bodies over its buffer to `/var/lib/nginx/body`). The `/oauth2/auth` location also needs `client_max_body_size`: nginx applies the sub-request's limit to the original upload, so without it any photo over 1 MB fails with a 500.
 * Rate limits per client address: page 10 r/s, searches 30 r/min (burst 10), OCR 6 r/min.
   Adjust in `cryptok-http.conf`.
 * Whatever `Authorization`, `X-Forwarded-For` or `X-Auth-Request-Email` a browser sends is
@@ -94,7 +94,7 @@ oauth2-proxy (the real oauth2-proxy and Google were not available): redirect fro
 sign-in redirect for the page versus `401` for the API, forged `Authorization`,
 `X-Forwarded-For` and `X-Auth-Request-Email` headers being overwritten, wrong `Host` refused,
 direct access without the shared secret refused, SSE progress arriving incrementally through the
-proxy, a 30 MB upload rejected by nginx while a normal image OCRs, the 1 KB body limit on page
+proxy, a 30 MB upload rejected by nginx while a normal image and an 11.7 MB one OCR (testing found and fixed the 1 MB sub-request limit above), `strace` showing no file written by the app, Tesseract or (with buffering off) nginx, the 1 KB body limit on page
 routes, `429` after the rate limit, and the whole UI (solve, crib, transposition, OCR upload)
 working in headless Chromium at `/solver/`.
 

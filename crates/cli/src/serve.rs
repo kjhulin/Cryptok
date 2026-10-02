@@ -18,7 +18,6 @@ use cryptok_core::rkc::{self, RkcOptions, RkcSolution, StepInfo};
 use cryptok_core::text::{scrub, unscrub};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -47,8 +46,6 @@ pub struct Config {
     pub max_letters: usize,
     pub max_beam: usize,
     pub max_keywords: usize,
-    /// Private directory for OCR uploads.
-    pub tmp_dir: PathBuf,
 }
 
 pub fn is_loopback(host: &str) -> bool {
@@ -72,7 +69,6 @@ impl Config {
             max_letters: if local { 100_000 } else { 2_000 },
             max_beam: if local { 2_000_000 } else { 100_000 },
             max_keywords: if local { 20_000 } else { 500 },
-            tmp_dir: std::env::temp_dir(),
         }
     }
 }
@@ -283,11 +279,15 @@ fn read_request(stream: &TcpStream) -> Result<Option<Request>, Refusal> {
             let mut chunk = vec![0u8; 64 * 1024];
             while body.len() < n {
                 if Instant::now() > deadline {
+                    crate::ocr::wipe(&mut body);
                     return Err(("408 Request Timeout", "upload too slow"));
                 }
                 let want = chunk.len().min(n - body.len());
                 match r.read(&mut chunk[..want]) {
-                    Ok(0) | Err(_) => return Err(("400 Bad Request", "incomplete upload")),
+                    Ok(0) | Err(_) => {
+                        crate::ocr::wipe(&mut body);
+                        return Err(("400 Bad Request", "incomplete upload"));
+                    }
                     Ok(k) => body.extend_from_slice(&chunk[..k]),
                 }
             }
@@ -560,7 +560,7 @@ fn api_ocr(stream: &TcpStream, st: &ServerState, req: &Request) -> std::io::Resu
         allow_digits: req.q("digits") == "1",
         lang: "eng".into(),
     };
-    match crate::ocr::ocr_bytes(&req.body, &opt, &st.cfg.tmp_dir) {
+    match crate::ocr::ocr_bytes(&req.body, &opt) {
         Ok(r) => respond(
             stream,
             "200 OK",
@@ -584,11 +584,19 @@ fn api_ocr(stream: &TcpStream, st: &ServerState, req: &Request) -> std::io::Resu
 }
 
 fn handle(stream: TcpStream, st: &ServerState) -> std::io::Result<()> {
-    let req = match read_request(&stream) {
+    let mut req = match read_request(&stream) {
         Ok(Some(r)) => r,
         Ok(None) => return Ok(()),
         Err(e) => return refuse(&stream, e),
     };
+    let result = route(stream, st, &req);
+    // An uploaded photo lives only in this buffer (it is piped to Tesseract, never written
+    // to disk); overwrite it before it is freed.
+    crate::ocr::wipe(&mut req.body);
+    result
+}
+
+fn route(stream: TcpStream, st: &ServerState, req: &Request) -> std::io::Result<()> {
     // Load-balancer health check: no Host or credentials, reveals nothing.
     if req.path == "/healthz" {
         return respond(&stream, "200 OK", "text/plain", "ok");

@@ -19,6 +19,9 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 MemoryMax=2G
+# Uploaded photos live only in memory: keep them out of core dumps and swap.
+LimitCORE=0
+MemorySwapMax=0
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_INET AF_INET6
 SystemCallFilter=@system-service

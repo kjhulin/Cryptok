@@ -667,7 +667,6 @@ fn cmd_serve(a: &Args) -> Result<(), String> {
     cfg.max_letters = a.num("max-letters", cfg.max_letters)?;
     cfg.max_beam = a.num("max-beam", cfg.max_beam)?;
     cfg.max_keywords = a.num("max-keywords", cfg.max_keywords)?;
-    cfg.tmp_dir = ocr::private_temp_dir().map_err(|e| format!("cannot create a private upload directory: {e}"))?;
 
     let state = serve::ServerState::new(lm, quad, sources, a.get("model", "cryptok.cklm"), words, ocr, cfg);
     serve::run(state, !a.has("no-open"))

@@ -51,9 +51,9 @@ Task definition essentials:
 * `command`/entrypoint args: `--allowed-host cryptok.example.com` (the public host name; the
   ALB passes it through, and anything else gets `421`).
 * `secrets`: `CRYPTOK_AUTH` from Secrets Manager.
-* `readonlyRootFilesystem: true`, with a writable `/tmp` volume (OCR uploads go to a private
-  `0700` directory under it). Run as the image's non-root user, drop all Linux capabilities,
-  `memory: 2048`, `cpu: 2048` or more.
+* `readonlyRootFilesystem: true`. The app writes no files (uploaded photos are piped to Tesseract
+  in memory and never stored), so no writable volume is needed. Run as the image's non-root user,
+  drop all Linux capabilities, `memory: 2048`, `cpu: 2048` or more.
 * No task role permissions beyond logging.
 
 ## EC2 + systemd (alternative)
@@ -90,7 +90,7 @@ Anything non-loopback uses these defaults; override with the flags shown in `cry
 | Cipher length | 2,000 letters | `--max-letters` |
 | Running-key beam | 100,000 | `--max-beam` |
 | Candidate keywords | 500 | `--max-keywords` |
-| Image upload | 25 MB, 12,000 px a side, 50 megapixels, 40 s of OCR | fixed |
+| Image upload | 25 MB, 12,000 px a side, 50 megapixels, 40 s of OCR; held in memory only, never stored | fixed |
 
 ## Checklist before going live
 
@@ -101,5 +101,6 @@ Anything non-loopback uses these defaults; override with the flags shown in `cry
 - [ ] `bench/private` is **not** in the image or on the host: its copyrighted key texts would be
       readable through the known-text search.
 - [ ] WAF rate rule attached; CloudWatch alarms on 5xx and on authentication failures.
+- [ ] Photos are not retained: ALB/WAF/CDN logging must not capture request bodies (ALB access logs record the URL but not the body).
 - [ ] Ciphertext is sent in URLs (`GET /api/rkc?cipher=...`), so ALB access logs, if enabled,
       would record it. Leave ALB access logging off or restrict who can read that bucket.
