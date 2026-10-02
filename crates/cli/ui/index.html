@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cryptok Code Cracker</title>
+<link rel="icon" href="data:,">
 <style>
 :root {
   --film: #e8edef;
@@ -48,6 +49,16 @@ label.field { font-size: 13px; color: var(--muted); }
 textarea#cipher { width: 100%; min-height: 64px; resize: vertical; background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px;
   padding: 10px 12px; font: 16px/1.5 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; }
 .count { font: 12px var(--mono); color: var(--muted); }
+
+.scan { margin-top: 4px; }
+.scan .bar { margin-bottom: 6px; gap: 8px; }
+.scan select, .scan .opt { font-size: 13px; color: var(--muted); }
+.scan select { background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; padding: 5px 6px; }
+#cam video { max-width: 100%; max-height: 50vh; border: 1px solid var(--rule); border-radius: 4px; background: #000; display: block; margin-bottom: 6px; }
+#scan-result { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; margin: 6px 0; }
+#scan-result img { max-width: 260px; max-height: 120px; border: 1px solid var(--rule); border-radius: 4px; background: #fff; }
+#scan-result .note { flex: 1 1 260px; margin: 0; }
+[hidden] { display: none !important; }
 
 .panel { display: none; margin-top: 18px; }
 .panel.on { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 24px; }
@@ -124,6 +135,34 @@ pre.plain { white-space: pre-wrap; word-break: break-all; font: 14px/1.6 var(--m
     <label class="field" for="cipher">Ciphertext. Only letters are used; spaces, line breaks and ? marks are kept for display.</label>
     <textarea id="cipher" spellcheck="false" autocomplete="off"></textarea>
     <div class="count" id="count">0 letters</div>
+    <div class="scan">
+      <div class="bar">
+        <button class="quiet" id="scan-file" title="Read the ciphertext from a picture or scan">Scan image…</button>
+        <button class="quiet" id="scan-photo" hidden>Take photo</button>
+        <button class="quiet" id="scan-cam" hidden>Use webcam</button>
+        <select id="scan-psm" aria-label="Text layout in the image">
+          <option value="6">Block of text</option>
+          <option value="7">One line</option>
+          <option value="11">Scattered text</option>
+        </select>
+        <label class="opt"><input type="checkbox" id="scan-digits"> allow digits</label>
+        <span class="count" id="scan-status" role="status"></span>
+      </div>
+      <input type="file" id="file-in" accept="image/*" hidden>
+      <input type="file" id="photo-in" accept="image/*" capture="environment" hidden>
+      <div id="cam" hidden>
+        <video id="cam-video" playsinline muted autoplay></video>
+        <div class="bar">
+          <button class="primary" id="cam-snap">Capture</button>
+          <button class="quiet" id="cam-stop">Cancel</button>
+          <select id="cam-sel" aria-label="Camera" hidden></select>
+        </div>
+      </div>
+      <div id="scan-result" hidden>
+        <img id="scan-img" alt="The image that was read">
+        <p class="note" id="scan-note"></p>
+      </div>
+    </div>
   </div>
 
   <!-- Running key -->
@@ -232,6 +271,9 @@ pre.plain { white-space: pre-wrap; word-break: break-all; font: 14px/1.6 var(--m
 
 <script>
 const $ = (s) => document.querySelector(s);
+// API calls use relative URLs so the page works under a path prefix (e.g. https://host/solver/).
+// Everything that reaches innerHTML from the server or the user goes through esc().
+const esc = (v) => String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const L = (i) => String.fromCharCode(65 + i);
 const mod = (x) => ((x % 26) + 26) % 26;
 
@@ -251,7 +293,7 @@ document.querySelectorAll('nav button').forEach((b) => b.addEventListener('click
 }));
 
 // ---------- info
-fetch('/api/info').then((r) => r.json()).then((info) => {
+fetch('api/info').then((r) => r.json()).then((info) => {
   $('#status').textContent = `Order-${info.order} model ready, ${info.threads} cores`;
   $('#sources-note').textContent = `${info.sources.length} texts, ${(info.source_letters / 1e6).toFixed(1)} million letters. ` +
     `Start the server with --sources to add your own (lyrics, speeches, books).`;
@@ -274,6 +316,172 @@ function readCipher() {
   }
 }
 $('#cipher').addEventListener('input', readCipher);
+
+
+// ---------- scan an image (upload, phone camera, webcam) and OCR it
+const scan = {
+  tesseractLoading: null,
+  stream: null,
+  setStatus(t) { $('#scan-status').textContent = t; },
+  info: { ocr: false },
+};
+fetch('api/info').then((r) => r.json()).then((i) => { scan.info = i; }).catch(() => {});
+
+// Same rules as the server: upper-case letters, keep ? and line breaks, drop other noise.
+function cleanOcr(raw, digits) {
+  let out = '', dropped = 0, space = false, letters = 0;
+  for (const ch of raw) {
+    if (ch === '\n') { out = out.replace(/ +$/, ''); if (out && !out.endsWith('\n')) out += '\n'; space = false; }
+    else if (/\s/.test(ch)) space = true;
+    else if (/[A-Za-z?]/.test(ch) || (digits && /[0-9]/.test(ch))) {
+      if (space && out && !out.endsWith('\n')) out += ' ';
+      space = false;
+      if (/[A-Za-z]/.test(ch)) letters++;
+      out += ch.toUpperCase();
+    } else dropped++;
+  }
+  return { text: out.trimEnd(), dropped, letters };
+}
+
+// Decode (applying the photo's EXIF rotation) and shrink to at most 2400 px.
+async function imageToCanvas(source) {
+  let w, h, draw;
+  if (source instanceof HTMLVideoElement) { w = source.videoWidth; h = source.videoHeight; draw = (c) => c.drawImage(source, 0, 0, c.canvas.width, c.canvas.height); }
+  else {
+    const bmp = await createImageBitmap(source, { imageOrientation: 'from-image' });
+    w = bmp.width; h = bmp.height; draw = (c) => c.drawImage(bmp, 0, 0, c.canvas.width, c.canvas.height);
+  }
+  const k = Math.min(1, 2400 / Math.max(w, h));
+  const cv = document.createElement('canvas');
+  cv.width = Math.max(1, Math.round(w * k)); cv.height = Math.max(1, Math.round(h * k));
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height);
+  draw(ctx);
+  return cv;
+}
+const canvasBlob = (cv, type = 'image/jpeg', q = 0.92) => new Promise((res) => cv.toBlob(res, type, q));
+
+// Grayscale and stretch contrast: helps Tesseract.js on photographs.
+function enhance(cv) {
+  const out = document.createElement('canvas'); out.width = cv.width; out.height = cv.height;
+  const ctx = out.getContext('2d'); ctx.drawImage(cv, 0, 0);
+  const img = ctx.getImageData(0, 0, out.width, out.height), d = img.data;
+  let lo = 255, hi = 0;
+  for (let i = 0; i < d.length; i += 4) { const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; d[i] = g; if (g < lo) lo = g; if (g > hi) hi = g; }
+  const span = Math.max(1, hi - lo);
+  for (let i = 0; i < d.length; i += 4) { const g = Math.max(0, Math.min(255, ((d[i] - lo) * 255) / span)); d[i] = d[i + 1] = d[i + 2] = g; }
+  ctx.putImageData(img, 0, 0);
+  return out;
+}
+
+function loadTesseractJs() {
+  if (window.Tesseract) return Promise.resolve();
+  scan.tesseractLoading ??= new Promise((resolve, reject) => {
+    const el = document.createElement('script');
+    el.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+    el.onload = resolve;
+    el.onerror = () => { scan.tesseractLoading = null; reject(new Error('Could not download Tesseract.js (are you offline?). Install the tesseract program and restart `cryptok serve` to read images without internet.')); };
+    document.head.appendChild(el);
+  });
+  return scan.tesseractLoading;
+}
+
+async function ocrOnServer(cv, psm, digits) {
+  const blob = await canvasBlob(cv);
+  const r = await fetch(`api/ocr?psm=${psm}&digits=${digits ? 1 : 0}`, { method: 'POST', headers: { 'X-Cryptok': '1' }, body: blob });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || `OCR failed (${r.status})`);
+  return { text: j.text, dropped: j.dropped, letters: j.letters, confidence: null };
+}
+
+async function ocrInBrowser(cv, psm, digits) {
+  scan.setStatus('Loading OCR engine…');
+  await loadTesseractJs();
+  const worker = await Tesseract.createWorker('eng', 1, {
+    logger: (m) => { if (m.status) scan.setStatus(`${m.status}${m.progress ? ' ' + Math.round(m.progress * 100) + '%' : ''}`); },
+  });
+  try {
+    await worker.setParameters({
+      tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz?' + (digits ? '0123456789' : ''),
+      tessedit_pageseg_mode: String(psm),
+    });
+    const { data } = await worker.recognize(enhance(cv));
+    return { ...cleanOcr(data.text, digits), confidence: data.confidence };
+  } finally { await worker.terminate(); }
+}
+
+async function scanImage(source) {
+  const psm = $('#scan-psm').value, digits = $('#scan-digits').checked;
+  try {
+    scan.setStatus('Reading image…');
+    const cv = await imageToCanvas(source);
+    $('#scan-img').src = URL.createObjectURL(await canvasBlob(cv, 'image/jpeg', 0.7));
+    $('#scan-result').hidden = false;
+    $('#scan-note').textContent = '';
+    const r = scan.info.ocr ? await ocrOnServer(cv, psm, digits) : await ocrInBrowser(cv, psm, digits);
+    if (!r.letters) { scan.setStatus(''); $('#scan-note').textContent = 'No letters found. Try another layout setting, a sharper photo, or crop the picture to just the ciphertext.'; return; }
+    const cur = $('#cipher').value.trim();
+    if (cur && cur.toUpperCase() !== r.text && !confirm('Replace the current ciphertext with the scanned text?')) { scan.setStatus(''); return; }
+    $('#cipher').value = r.text;
+    readCipher();
+    scan.setStatus('');
+    const conf = r.confidence == null ? '' : ` Mean confidence ${Math.round(r.confidence)}%.`;
+    $('#scan-note').textContent = `Read ${r.letters} letters${r.dropped ? `, dropped ${r.dropped} stray marks` : ''}.${conf} Compare it with the picture and fix mistakes before solving: one wrong letter shifts every key and crib. I and J, O and Q, and U and V are easily confused.`;
+  } catch (e) {
+    scan.setStatus('');
+    $('#scan-result').hidden = false;
+    $('#scan-note').textContent = String(e.message || e);
+  }
+}
+
+$('#scan-file').addEventListener('click', () => $('#file-in').click());
+$('#scan-photo').addEventListener('click', () => $('#photo-in').click());
+for (const id of ['#file-in', '#photo-in']) {
+  $(id).addEventListener('change', (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) scanImage(f); });
+}
+if (matchMedia('(pointer: coarse)').matches) $('#scan-photo').hidden = false;
+
+// Drop or paste an image anywhere on the cipher box.
+const dropImage = (files) => { const f = [...files].find((x) => x.type.startsWith('image/')); if (f) { scanImage(f); return true; } return false; };
+document.querySelector('.cipher-box').addEventListener('dragover', (e) => { if ([...e.dataTransfer.items].some((i) => i.type.startsWith('image/'))) e.preventDefault(); });
+document.querySelector('.cipher-box').addEventListener('drop', (e) => { if (dropImage(e.dataTransfer.files)) e.preventDefault(); });
+document.addEventListener('paste', (e) => { if (dropImage(e.clipboardData?.files || [])) e.preventDefault(); });
+
+// Webcam (needs a secure context: localhost or https).
+async function startCam(deviceId) {
+  stopCam();
+  try {
+    scan.stream = await navigator.mediaDevices.getUserMedia({ video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: 'environment' }, width: { ideal: 1920 } }, audio: false });
+  } catch (e) {
+    $('#scan-result').hidden = false;
+    $('#scan-note').textContent = e.name === 'NotAllowedError' ? 'Camera access was denied. Allow it in the browser address bar, or use "Scan image…".' : `Could not open the camera: ${e.message}`;
+    return;
+  }
+  $('#cam-video').srcObject = scan.stream;
+  $('#cam').hidden = false;
+  const cams = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
+  const sel = $('#cam-sel');
+  sel.replaceChildren(...cams.map((d, i) => Object.assign(document.createElement('option'), { value: d.deviceId, textContent: d.label || 'Camera ' + (i + 1) })));
+  sel.hidden = cams.length < 2;
+  const cur = scan.stream.getVideoTracks()[0]?.getSettings().deviceId;
+  if (cur) sel.value = cur;
+}
+function stopCam() {
+  scan.stream?.getTracks().forEach((t) => t.stop());
+  scan.stream = null;
+  $('#cam').hidden = true;
+}
+if (navigator.mediaDevices?.getUserMedia) $('#scan-cam').hidden = false;
+$('#scan-cam').addEventListener('click', () => startCam());
+$('#cam-sel').addEventListener('change', (e) => startCam(e.target.value));
+$('#cam-stop').addEventListener('click', stopCam);
+$('#cam-snap').addEventListener('click', async () => {
+  const v = $('#cam-video');
+  if (!v.videoWidth) return;
+  const cv = await imageToCanvas(v);
+  stopCam();
+  scanImage(await canvasBlob(cv, 'image/png'));
+});
 
 // ---------- layout helpers: worksheet lines
 function perLine(container) {
@@ -417,14 +625,14 @@ $('#solve').addEventListener('click', () => {
   state.results = []; state.liveBest = null; state.showAll = false; renderResults();
   btn.textContent = 'Stop'; btn.classList.add('stop');
   $('#rkc-head').textContent = 'Results';
-  state.running = stream(`/api/rkc?cipher=${encodeURIComponent($('#cipher').value)}&beam=${$('#beam').value}&key=${pins}`,
+  state.running = stream(`api/rkc?cipher=${encodeURIComponent($('#cipher').value)}&beam=${$('#beam').value}&key=${pins}`,
     (p) => {
       $('#rkc-prog').style.width = (100 * p.step / p.total) + '%';
       $('#rkc-time').textContent = `${p.step} / ${p.total}`;
       state.liveBest = p.best.slice(0, 1); renderResults();
     },
     (d) => {
-      if (d.error) { $('#rkc-results').innerHTML = `<p class="err">${d.error}</p>`; return; }
+      if (d.error) { $('#rkc-results').innerHTML = `<p class="err">${esc(d.error)}</p>`; return; }
       state.results = d.results; state.liveBest = null;
       $('#rkc-time').textContent = `${d.secs.toFixed(2)} s`;
       renderResults();
@@ -438,8 +646,8 @@ $('#crib-form').addEventListener('submit', (e) => {
   readCipher();
   const word = $('#crib').value.toUpperCase().replace(/[^A-Z]/g, '');
   if (!word || !state.letters.length) return;
-  fetch(`/api/crib?cipher=${encodeURIComponent($('#cipher').value)}&word=${word}`).then((r) => r.json()).then((hits) => {
-    $('#crib-list').innerHTML = hits.map((h) => `<li><span class="pos">${h.pos + 1}</span><span>${h.other}</span>
+  fetch(`api/crib?cipher=${encodeURIComponent($('#cipher').value)}&word=${word}`).then((r) => r.json()).then((hits) => {
+    $('#crib-list').innerHTML = hits.map((h) => `<li><span class="pos">${h.pos + 1}</span><span>${esc(h.other)}</span>
       <span><button class="quiet" data-pos="${h.pos}" data-as="a" title="Put ${word} in row A">A</button>
       <button class="quiet" data-pos="${h.pos}" data-as="b" title="Put ${word} in row B">B</button></span></li>`).join('')
       || '<li>No room for that word.</li>';
@@ -460,10 +668,10 @@ $('#known-run').addEventListener('click', () => {
   readCipher();
   const t0 = performance.now();
   btn.disabled = true; $('#known-results').innerHTML = '';
-  stream(`/api/known?cipher=${encodeURIComponent($('#cipher').value)}`,
+  stream(`api/known?cipher=${encodeURIComponent($('#cipher').value)}`,
     (p) => { $('#known-prog').style.width = p.pct + '%'; },
     (d) => {
-      if (d.error) { $('#known-results').innerHTML = `<p class="err">${d.error}</p>`; return; }
+      if (d.error) { $('#known-results').innerHTML = `<p class="err">${esc(d.error)}</p>`; return; }
       $('#known-time').textContent = `${d.secs.toFixed(2)} s`;
       const n = state.letters.length, per = perLine($('#known-results'));
       $('#known-results').innerHTML = d.results.map((h, k) => {
@@ -475,7 +683,7 @@ $('#known-run').addEventListener('click', () => {
           const sp = (str) => [...str.slice(s, e)].map((c) => `<span>${c}</span>`).join('');
           lines += `<div class="line"><div class="idx">${s + 1}</div><div class="rows"><div class="row a">${sp(ka)}</div><div class="row b">${sp(kb)}</div></div></div>`;
         }
-        return `<div class="result" data-k="${k}"><header><strong>${h.source}</strong>
+        return `<div class="result" data-k="${k}"><header><strong>${esc(h.source)}</strong>
           <span class="score">from letter ${h.offset}, reads as English in ${(h.coverage * 100).toFixed(0)}% of positions</span>
           <button class="quiet use-known">Pin as hints</button></header>${lines}</div>`;
       }).join('') || '<p class="empty">No source lines up with this cipher.</p>';
@@ -495,12 +703,13 @@ $('#known-results').addEventListener('click', (e) => {
 $('#vig-run').addEventListener('click', () => {
   const btn = $('#vig-run'); btn.disabled = true;
   $('#vig-results').innerHTML = '<p class="empty">Solving…</p>';
-  fetch(`/api/vigenere?text=${encodeURIComponent($('#cipher').value)}&alphabets=${encodeURIComponent($('#alphabets').value)}&max_period=${$('#maxp').value}&keywords=${encodeURIComponent($('#keywords').value)}`)
+  fetch(`api/vigenere?text=${encodeURIComponent($('#cipher').value)}&alphabets=${encodeURIComponent($('#alphabets').value)}&max_period=${$('#maxp').value}&keywords=${encodeURIComponent($('#keywords').value)}`)
     .then((r) => r.json()).then((d) => {
+      if (d.error) { $('#vig-results').innerHTML = `<p class="err">${esc(d.error)}</p>`; return; }
       $('#vig-time').textContent = `${d.secs.toFixed(2)} s`;
-      $('#vig-results').innerHTML = d.results.map((r, k) => `<div class="result"><header><strong>${k === 0 ? 'Best' : '#' + (k + 1)}: key ${r.key}</strong>
-        <span class="score">length ${r.period}, alphabet ${r.alphabet}, ${r.per_letter.toFixed(3)} per letter</span></header>
-        <pre class="plain">${r.plain.replace(/[<&]/g, (c) => c === '<' ? '&lt;' : '&amp;')}</pre></div>`).join('');
+      $('#vig-results').innerHTML = d.results.map((r, k) => `<div class="result"><header><strong>${k === 0 ? 'Best' : '#' + (k + 1)}: key ${esc(r.key)}</strong>
+        <span class="score">length ${r.period}, alphabet ${esc(r.alphabet)}, ${r.per_letter.toFixed(3)} per letter</span></header>
+        <pre class="plain">${esc(r.plain)}</pre></div>`).join('');
     }).finally(() => { btn.disabled = false; });
 });
 
@@ -508,11 +717,12 @@ $('#vig-run').addEventListener('click', () => {
 $('#trans-run').addEventListener('click', () => {
   const btn = $('#trans-run'); btn.disabled = true;
   $('#trans-results').innerHTML = '<p class="empty">Solving…</p>';
-  fetch(`/api/transpose?text=${encodeURIComponent($('#cipher').value)}`).then((r) => r.json()).then((d) => {
+  fetch(`api/transpose?text=${encodeURIComponent($('#cipher').value)}`).then((r) => r.json()).then((d) => {
+    if (d.error) { $('#trans-results').innerHTML = `<p class="err">${esc(d.error)}</p>`; return; }
     $('#trans-time').textContent = `${d.secs.toFixed(2)} s`;
     $('#trans-results').innerHTML = d.results.map((r, k) => `<div class="result"><header><strong>${k === 0 ? 'Best' : '#' + (k + 1)}</strong>
-      <span class="score">${r.method}, ${r.per_letter.toFixed(3)} per letter</span></header>
-      <pre class="plain">${r.text.replace(/[<&]/g, (c) => c === '<' ? '&lt;' : '&amp;')}</pre></div>`).join('') || '<p class="empty">Need at least 8 letters.</p>';
+      <span class="score">${esc(r.method)}, ${r.per_letter.toFixed(3)} per letter</span></header>
+      <pre class="plain">${esc(r.text)}</pre></div>`).join('') || '<p class="empty">Need at least 8 letters.</p>';
   }).finally(() => { btn.disabled = false; });
 });
 

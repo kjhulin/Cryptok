@@ -1,0 +1,16 @@
+id	contest	type	found	accuracy	secs	result
+dc20	defcon-20	rkc	rkc	0.583	4.3	partial
+dc23	defcon-23	rkc	rkc	0.775	1.3	partial
+kryptos-k1	kryptos	quagmire3	quagmire3	1.000	5.0	SOLVED
+kryptos-k2	kryptos	quagmire3	quagmire3	1.000	11.8	SOLVED
+kryptos-k3	kryptos	route	route	1.000	0.2	SOLVED
+syn-caesar	synthetic	affine	affine	1.000	1.6	SOLVED
+syn-goldbug	synthetic	subst	subst	1.000	2.4	SOLVED
+syn-qwerty-playfair	synthetic	playfair	playfair	1.000	12.5	SOLVED
+syn-beaufort	synthetic	beaufort	beaufort	1.000	8.4	SOLVED
+syn-vigenere	synthetic	vigenere	vigenère	1.000	8.2	SOLVED
+syn-autokey	synthetic	autokey	autokey	1.000	7.0	SOLVED
+syn-rail	synthetic	rail	rail	1.000	0.2	SOLVED
+syn-columnar-subst	synthetic	chain	chain	1.000	2.6	SOLVED
+syn-bifid	synthetic	bifid	bifid	1.000	16.3	SOLVED
+syn-hill	synthetic	hill	hill	1.000	6.9	SOLVED

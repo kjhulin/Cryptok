@@ -20,11 +20,45 @@ cryptok train          # once: learns corpus/ -> cryptok.cklm (~5 s, ~95 MB)
 cryptok serve          # opens the web UI at http://127.0.0.1:8077/
 ```
 
+**Reading ciphertext from a picture.** Under the ciphertext box, *Scan image…* reads an uploaded picture or scan (you can also drop or paste one), *Take photo* opens a phone's camera, and *Use webcam* takes a still from a computer camera. The recognised text lands in the ciphertext box with the picture beside it; check it before solving, because one misread letter shifts every key and crib (I/J, O/Q and U/V are the usual culprits, and clean, well-lit, straight-on shots work far better than angled photos). OCR uses the `tesseract` program when it is installed (`apt install tesseract-ocr`, `brew install tesseract`, or the Windows installer), otherwise the browser falls back to Tesseract.js, which needs internet the first time. Choose *One line* or *Scattered text* if a block layout misreads. From the command line: `cryptok ocr photo.jpg`, e.g. `cryptok analyze $(cryptok ocr photo.jpg)`. To use a phone on your network, start `CRYPTOK_AUTH=user:a-long-password cryptok serve --host 0.0.0.0` (the server refuses to listen beyond localhost without a login); browsers only allow the live webcam on localhost or https, but *Take photo* works over plain http.
+
 The web UI has three tabs:
 
 - **Running key** — solve, pin letters on the worksheet (type in either stream; the other follows), place cribs, drag across a result to pin that stretch, solve again.
 - **Known texts** — slide every source text along the cipher as a candidate key. Add your own sources (lyrics, speeches) with `--sources corpus,path/to/texts`.
 - **Vigenère** — repeating-key Vigenère, optionally over keyword-mixed alphabets.
+
+### Other ciphers (command line)
+
+Not sure what you have? `cryptok analyze TEXT` prints the index of coincidence, likely periods and which of these to try:
+
+| Command | Ciphers |
+|---|---|
+| `subst` | Caesar, Atbash, Affine (exhaustive), general monoalphabetic substitution (hill climbing) |
+| `periodic --mode …` | Vigenère, Beaufort, Variant Beaufort, Porta, Gronsfeld, Quagmire I–IV (`--plain-alphabet`/`--cipher-alphabet`) |
+| `autokey` | Vigenère autokey, plaintext and ciphertext key |
+| `transpose [--double]` | routes, keyed columnar, double columnar |
+| `rail` | rail fence (all rail counts and offsets); scytale is a one-step route in `transpose` |
+| `playfair`, `bifid` | 5×5 key square recovered by simulated annealing (Bifid over a list of periods) |
+| `hill` | 2×2 Hill cipher, all 157,248 keys |
+| `chain --steps a,b,…` | several layers at once, outermost first (e.g. `rail,subst`, `vigenere,columnar`); see below |
+| `decode --kind …` | Morse, A1Z26, Baconian, Polybius, binary, hex (no key or model needed) |
+
+```
+cryptok subst "$(cat mono.txt)"
+cryptok periodic --mode beaufort --max-period 12 CIPHER
+cryptok playfair CIPHER
+```
+
+**Chaining.** `cryptok chain --steps rail,subst CIPHER` undoes layers in the order given (outermost first). An outer layer is solved while the inner ones still scramble the text, so each stage is ranked by something the inner layers leave intact: unigram likelihood for a substitution/periodic layer over transpositions, bigram repetition for a transposition over monoalphabetic substitutions, and the full language model for the last step. Combinations with no such statistic (two transpositions in a row, a Playfair under anything) are rejected with an explanation; `autokey`, `hill`, `playfair` and `bifid` work only as the last step.
+
+### Measuring performance on contest ciphers
+
+`cryptok contest run` runs the analyser and every plausible solver automatically on each cipher in `bench/contests.tsv`, ranks the attempts by description length (plaintext fluency minus the cost of the key), and scores the winner against the known plaintext. `--verbose` lists every attempt, `--exhaustive` ignores the analyser's pruning, `--out FILE` saves a results table (the last baseline is `bench/contest-results.tsv`). The file holds DEF CON 20 and 23, Kryptos K1-K3 and ten synthetic contest-style puzzles (`bench/gen_synthetic.py`); add other contests as new rows. Only ciphertexts with a published solution belong there.
+
+### Deploying
+
+Listening on anything but localhost needs `CRYPTOK_AUTH`, applies conservative request, time and size limits, checks the `Host` header, and sends a strict content-security policy. Put it behind a TLS-terminating proxy: see [docs/DEPLOY-AWS.md](docs/DEPLOY-AWS.md) (with a `Dockerfile`) or, for nginx at a sub-path with Google sign-in, [docs/NGINX-SSO.md](docs/NGINX-SSO.md) and the audit in [SECURITY.md](SECURITY.md).
 
 ### Command line
 

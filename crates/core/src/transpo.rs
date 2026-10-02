@@ -79,6 +79,9 @@ impl Route {
 pub enum Method {
     Route(Vec<Route>),
     Columnar { order: Vec<usize> },
+    /// Two keyed columnar transpositions in a row; `first` was applied first when encrypting.
+    DoubleColumnar { first: Vec<usize>, second: Vec<usize> },
+    RailFence { rails: usize, offset: usize },
 }
 
 #[derive(Clone, Debug)]
@@ -100,16 +103,33 @@ impl TranspositionSolution {
                     .collect();
                 format!("columnar, {} columns, column order {}", order.len(), key)
             }
+            Method::DoubleColumnar { first, second } => {
+                format!("double columnar, keys {} then {}", order_key(first), order_key(second))
+            }
+            Method::RailFence { rails, offset } => format!("rail fence, {rails} rails, offset {offset}"),
         }
     }
+}
+
+fn order_key(order: &[usize]) -> String {
+    (0..order.len()).map(|i| (b'A' + order.iter().position(|&c| c == i).unwrap() as u8) as char).collect()
 }
 
 fn letters_of(chars: &[char]) -> Vec<u8> {
     scrub(&chars.iter().collect::<String>())
 }
 
+/// Scoring function over letters (`0..26`); higher is better.
+pub type Scorer<'a> = &'a (dyn Fn(&[u8]) -> f32 + Sync);
+
 /// Brute-force one and two route steps. Returns the best `top` by full-model score.
 pub fn solve_route(lm: &LangModel, q: &DenseNgram, text: &str, max_width: usize, top: usize) -> Vec<TranspositionSolution> {
+    solve_route_with(&|b| q.score(b), &|b| lm.score_per_letter(b), text, max_width, top)
+}
+
+/// [`solve_route`] with caller-supplied scoring: `fast` ranks every candidate (total
+/// score), `full` re-ranks the leaders (per-letter score).
+pub fn solve_route_with(fast: Scorer, full: Scorer, text: &str, max_width: usize, top: usize) -> Vec<TranspositionSolution> {
     let chars: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
     let n = chars.len();
     if n < 4 {
@@ -124,7 +144,7 @@ pub fn solve_route(lm: &LangModel, q: &DenseNgram, text: &str, max_width: usize,
     let score = |perm: &[u32], buf: &mut Vec<u8>| -> f32 {
         buf.clear();
         buf.extend(perm.iter().filter(|&&i| is_letter[i as usize]).map(|&i| letter[i as usize]));
-        q.score(buf) / buf.len().max(1) as f32
+        fast(buf) / buf.len().max(1) as f32
     };
 
     let threads = std::thread::available_parallelism().map(|x| x.get()).unwrap_or(1);
@@ -172,7 +192,7 @@ pub fn solve_route(lm: &LangModel, q: &DenseNgram, text: &str, max_width: usize,
             continue;
         }
         let l = letters_of(&t);
-        out.push(TranspositionSolution { method: Method::Route(steps), text, per_letter: lm.score_per_letter(&l) });
+        out.push(TranspositionSolution { method: Method::Route(steps), text, per_letter: full(&l) });
     }
     out.sort_by(|a, b| b.per_letter.total_cmp(&a.per_letter));
     out.truncate(top);
@@ -200,6 +220,11 @@ pub fn columnar_decrypt<T: Copy + Default>(c: &[T], order: &[usize]) -> Vec<T> {
 /// Recover a keyed columnar transposition by hill climbing the column order for each
 /// key length in `min_cols..=max_cols`.
 pub fn solve_columnar(lm: &LangModel, q: &DenseNgram, text: &str, min_cols: usize, max_cols: usize, restarts: usize, top: usize) -> Vec<TranspositionSolution> {
+    solve_columnar_with(&|b| q.score(b), &|b| lm.score_per_letter(b), text, min_cols, max_cols, restarts, top)
+}
+
+/// [`solve_columnar`] with caller-supplied scoring (see [`solve_route_with`]).
+pub fn solve_columnar_with(fast: Scorer, full: Scorer, text: &str, min_cols: usize, max_cols: usize, restarts: usize, top: usize) -> Vec<TranspositionSolution> {
     let chars: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
     let n = chars.len();
     let idx: Vec<u32> = (0..n as u32).collect();
@@ -210,7 +235,7 @@ pub fn solve_columnar(lm: &LangModel, q: &DenseNgram, text: &str, min_cols: usiz
         let p = columnar_decrypt(&idx, order);
         buf.clear();
         buf.extend(p.iter().filter(|&&i| is_letter[i as usize]).map(|&i| letter[i as usize]));
-        q.score(&buf)
+        fast(&buf)
     };
     let mut rng = 0x9E37_79B9_7F4A_7C15u64;
     let mut rand = move |m: usize| -> usize {
@@ -273,9 +298,139 @@ pub fn solve_columnar(lm: &LangModel, q: &DenseNgram, text: &str, min_cols: usiz
         let t: Vec<char> = p.iter().map(|&i| chars[i as usize]).collect();
         out.push(TranspositionSolution {
             method: Method::Columnar { order: best.0 },
-            per_letter: lm.score_per_letter(&letters_of(&t)),
+            per_letter: full(&letters_of(&t)),
             text: t.into_iter().collect(),
         });
+    }
+    out.sort_by(|a, b| b.per_letter.total_cmp(&a.per_letter));
+    out.truncate(top);
+    out
+}
+
+/// Rail index of each position in a zig-zag over `rails` rails, starting `offset` steps in.
+fn rail_pattern(n: usize, rails: usize, offset: usize) -> Vec<usize> {
+    let period = 2 * (rails - 1);
+    (0..n)
+        .map(|i| {
+            let t = (i + offset) % period;
+            if t < rails { t } else { period - t }
+        })
+        .collect()
+}
+
+/// Rail fence decryption (`rails >= 2`).
+pub fn rail_fence_decrypt<T: Copy + Default>(c: &[T], rails: usize, offset: usize) -> Vec<T> {
+    let n = c.len();
+    let pat = rail_pattern(n, rails, offset);
+    let mut pos: Vec<usize> = (0..n).collect();
+    pos.sort_by_key(|&i| (pat[i], i)); // ciphertext is read rail by rail
+    let mut out = vec![T::default(); n];
+    for (k, &i) in pos.iter().enumerate() {
+        out[i] = c[k];
+    }
+    out
+}
+
+pub fn rail_fence_encrypt<T: Copy>(p: &[T], rails: usize, offset: usize) -> Vec<T> {
+    let pat = rail_pattern(p.len(), rails, offset);
+    let mut pos: Vec<usize> = (0..p.len()).collect();
+    pos.sort_by_key(|&i| (pat[i], i));
+    pos.into_iter().map(|i| p[i]).collect()
+}
+
+/// Brute-force every rail count up to `max_rails` and every starting offset.
+pub fn solve_rail_fence(lm: &LangModel, text: &str, max_rails: usize, top: usize) -> Vec<TranspositionSolution> {
+    solve_rail_fence_with(&|b| lm.score_per_letter(b), text, max_rails, top)
+}
+
+/// [`solve_rail_fence`] with a caller-supplied per-letter scorer.
+pub fn solve_rail_fence_with(full: Scorer, text: &str, max_rails: usize, top: usize) -> Vec<TranspositionSolution> {
+    let chars: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let mut out = Vec::new();
+    for rails in 2..=max_rails.min(chars.len().saturating_sub(1)).max(2) {
+        for offset in 0..2 * (rails - 1) {
+            let t = rail_fence_decrypt(&chars, rails, offset);
+            out.push(TranspositionSolution {
+                method: Method::RailFence { rails, offset },
+                per_letter: full(&letters_of(&t)),
+                text: t.into_iter().collect(),
+            });
+        }
+    }
+    out.sort_by(|a, b| b.per_letter.total_cmp(&a.per_letter));
+    out.truncate(top);
+    out
+}
+
+/// Recover a double columnar transposition by simulated annealing over both column
+/// orders, for every pair of key lengths in `min_cols..=max_cols`.
+pub fn solve_double_columnar(lm: &LangModel, q: &DenseNgram, text: &str, min_cols: usize, max_cols: usize, iters: usize, restarts: usize, top: usize) -> Vec<TranspositionSolution> {
+    let chars: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let n = chars.len();
+    let idx: Vec<u32> = (0..n as u32).collect();
+    let is_letter: Vec<bool> = chars.iter().map(|c| c.is_ascii_alphabetic()).collect();
+    let letter: Vec<u8> = chars.iter().map(|c| (c.to_ascii_uppercase() as u8).wrapping_sub(b'A')).collect();
+    let mut buf = Vec::with_capacity(n);
+    let mut eval = |o1: &[usize], o2: &[usize]| -> f32 {
+        let p = columnar_decrypt(&columnar_decrypt(&idx, o2), o1);
+        buf.clear();
+        buf.extend(p.iter().filter(|&&i| is_letter[i as usize]).map(|&i| letter[i as usize]));
+        q.score(&buf)
+    };
+    let mut rng = crate::rng::Rng::new(0xD0B1E);
+    let mut out = Vec::new();
+    for k1 in min_cols.max(2)..=max_cols.min(n / 2) {
+        for k2 in min_cols.max(2)..=max_cols.min(n / 2) {
+            let mut best: Option<(Vec<usize>, Vec<usize>, f32)> = None;
+            for _ in 0..restarts.max(1) {
+                let mut o1: Vec<usize> = (0..k1).collect();
+                let mut o2: Vec<usize> = (0..k2).collect();
+                rng.shuffle(&mut o1);
+                rng.shuffle(&mut o2);
+                let mut cur = eval(&o1, &o2);
+                let mut top_here = (o1.clone(), o2.clone(), cur);
+                let (t0, t1) = (4.0f32, 0.1f32);
+                for it in 0..iters {
+                    let temp = t0 * (t1 / t0).powf(it as f32 / iters as f32);
+                    let which = rng.below(k1 + k2) < k1;
+                    let order = if which { &mut o1 } else { &mut o2 };
+                    let len = order.len();
+                    let (i, j) = (rng.below(len), rng.below(len));
+                    if i == j {
+                        continue;
+                    }
+                    let saved = order.clone();
+                    if rng.below(2) == 0 {
+                        order.swap(i, j);
+                    } else {
+                        let c = order.remove(i);
+                        order.insert(j, c);
+                    }
+                    let sc = eval(&o1, &o2);
+                    if sc >= cur || ((sc - cur) / temp).exp() > rng.unit() {
+                        cur = sc;
+                        if cur > top_here.2 {
+                            top_here = (o1.clone(), o2.clone(), cur);
+                        }
+                    } else if which {
+                        o1 = saved;
+                    } else {
+                        o2 = saved;
+                    }
+                }
+                if best.as_ref().is_none_or(|b| top_here.2 > b.2) {
+                    best = Some(top_here);
+                }
+            }
+            let (o1, o2, _) = best.unwrap();
+            let p = columnar_decrypt(&columnar_decrypt(&idx, &o2), &o1);
+            let t: Vec<char> = p.iter().map(|&i| chars[i as usize]).collect();
+            out.push(TranspositionSolution {
+                method: Method::DoubleColumnar { first: o1, second: o2 },
+                per_letter: lm.score_per_letter(&letters_of(&t)),
+                text: t.into_iter().collect(),
+            });
+        }
     }
     out.sort_by(|a, b| b.per_letter.total_cmp(&a.per_letter));
     out.truncate(top);
@@ -294,6 +449,53 @@ mod tests {
             inv.inverse = !r.inverse;
             assert_eq!(inv.apply(&r.apply(&s)), s, "{r:?}");
         }
+    }
+
+    #[test]
+    fn rail_fence_known_example() {
+        // Classic: WEAREDISCOVEREDFLEEATONCE on 3 rails.
+        let p: Vec<char> = "WEAREDISCOVEREDFLEEATONCE".chars().collect();
+        let c: String = rail_fence_encrypt(&p, 3, 0).into_iter().collect();
+        assert_eq!(c, "WECRLTEERDSOEEFEAOCAIVDEN");
+        for rails in 2..6 {
+            for off in 0..2 * (rails - 1) {
+                assert_eq!(rail_fence_decrypt(&rail_fence_encrypt(&p, rails, off), rails, off), p);
+            }
+        }
+    }
+
+    #[test]
+    fn solves_rail_fence() {
+        use crate::testutil::{model, sample};
+        let p: String = crate::text::unscrub(&sample(70_000, 120));
+        let chars: Vec<char> = p.chars().collect();
+        let c: String = rail_fence_encrypt(&chars, 4, 2).into_iter().collect();
+        let best = &solve_rail_fence(model(), &c, 8, 1)[0];
+        assert_eq!(best.text, p);
+    }
+
+    #[test]
+    fn solves_double_columnar() {
+        use crate::testutil::{model, sample};
+        let lm = model();
+        let q = lm.dense(4);
+        let p: String = crate::text::unscrub(&sample(80_000, 240));
+        let chars: Vec<char> = p.chars().collect();
+        let enc = |t: &[char], order: &[usize]| -> Vec<char> {
+            let k = order.len();
+            let mut out = Vec::new();
+            for &col in order {
+                let mut i = col;
+                while i < t.len() {
+                    out.push(t[i]);
+                    i += k;
+                }
+            }
+            out
+        };
+        let c: String = enc(&enc(&chars, &[2, 0, 3, 1]), &[1, 3, 0, 2]).into_iter().collect();
+        let best = &solve_double_columnar(lm, &q, &c, 4, 4, 20_000, 4, 1)[0];
+        assert_eq!(best.text, p);
     }
 
     #[test]
