@@ -26,6 +26,27 @@ The web UI has three tabs:
 - **Known texts** — slide every source text along the cipher as a candidate key. Add your own sources (lyrics, speeches) with `--sources corpus,path/to/texts`.
 - **Vigenère** — repeating-key Vigenère, optionally over keyword-mixed alphabets.
 
+### Other ciphers (command line)
+
+Not sure what you have? `cryptok analyze TEXT` prints the index of coincidence, likely periods and which of these to try:
+
+| Command | Ciphers |
+|---|---|
+| `subst` | Caesar, Atbash, Affine (exhaustive), general monoalphabetic substitution (hill climbing) |
+| `periodic --mode …` | Vigenère, Beaufort, Variant Beaufort, Porta, Gronsfeld, Quagmire I–IV (`--plain-alphabet`/`--cipher-alphabet`) |
+| `autokey` | Vigenère autokey, plaintext and ciphertext key |
+| `transpose [--double]` | routes, keyed columnar, double columnar |
+| `rail` | rail fence (all rail counts and offsets); scytale is a one-step route in `transpose` |
+| `playfair`, `bifid` | 5×5 key square recovered by simulated annealing (Bifid over a list of periods) |
+| `hill` | 2×2 Hill cipher, all 157,248 keys |
+| `decode --kind …` | Morse, A1Z26, Baconian, Polybius, binary, hex (no key or model needed) |
+
+```
+cryptok subst "$(cat mono.txt)"
+cryptok periodic --mode beaufort --max-period 12 CIPHER
+cryptok playfair CIPHER
+```
+
 ### Command line
 
 ```
