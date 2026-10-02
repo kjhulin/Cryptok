@@ -16,6 +16,7 @@
 use crate::lm::LangModel;
 use crate::map::U64Map;
 use crate::text::dec;
+use crate::words::{StreamState, WordTrie};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone, Debug)]
@@ -30,11 +31,16 @@ pub struct RkcOptions {
     pub plain_hints: Vec<Option<u8>>,
     /// Worker threads (0 = all available cores).
     pub threads: usize,
+    /// Weight of the word-model score when a word trie is supplied (see [`solve_words`]).
+    pub word_weight: f32,
+    /// Number of trailing key letters that identify a state for merging
+    /// (0 = the model order, or 10 when a word model is used). Must be at least the order.
+    pub merge_len: usize,
 }
 
 impl Default for RkcOptions {
     fn default() -> Self {
-        RkcOptions { beam: 100_000, results: 10, key_hints: vec![], plain_hints: vec![], threads: 0 }
+        RkcOptions { beam: 100_000, results: 10, key_hints: vec![], plain_hints: vec![], threads: 0, word_weight: 1.0, merge_len: 0 }
     }
 }
 
@@ -69,6 +75,8 @@ pub struct StepInfo<'a> {
 #[derive(Clone, Copy)]
 struct Hyp {
     kctx: u64,
+    /// Longer key history used to identify the state for merging.
+    khist: u64,
     pctx: u64,
     score: f32,
     diverged: bool,
@@ -105,6 +113,20 @@ pub fn solve(
     lm: &LangModel,
     cipher: &[u8],
     opts: &RkcOptions,
+    on_step: Option<&mut dyn FnMut(&StepInfo)>,
+    cancel: Option<&AtomicBool>,
+) -> Vec<RkcSolution> {
+    solve_words(lm, None, cipher, opts, on_step, cancel)
+}
+
+/// Like [`solve`], but when `words` is given each hypothesis is also scored by the best
+/// word segmentation of its key and plaintext so far (weighted by `opts.word_weight`),
+/// so the beam prefers paths that spell words.
+pub fn solve_words(
+    lm: &LangModel,
+    words: Option<&WordTrie>,
+    cipher: &[u8],
+    opts: &RkcOptions,
     mut on_step: Option<&mut dyn FnMut(&StepInfo)>,
     cancel: Option<&AtomicBool>,
 ) -> Vec<RkcSolution> {
@@ -124,7 +146,12 @@ pub fn solve(
         opts.threads
     };
 
-    let mut hyps = vec![Hyp { kctx: 0, pctx: 0, score: 0.0, diverged: false }];
+    let merge_len = if opts.merge_len > 0 { opts.merge_len } else if words.is_some() { 10 } else { k_order }.clamp(k_order, 13);
+    let merge_mod = 26u64.pow(merge_len as u32);
+    let ww = opts.word_weight;
+    let mut hyps = vec![Hyp { kctx: 0, khist: 0, pctx: 0, score: 0.0, diverged: false }];
+    // Word-segmentation state of (key, plaintext) per hypothesis; empty without a word model.
+    let mut wst: Vec<(StreamState, StreamState)> = if words.is_some() { vec![(StreamState::new(), StreamState::new())] } else { vec![] };
     let mut backs: Vec<Back> = Vec::with_capacity(n);
     let mut seen = U64Map::with_capacity(beam * 2);
     let mut cands: Vec<Cand> = Vec::new();
@@ -150,7 +177,11 @@ pub fn solve(
                     if prune_mirror && !h.diverged && k > p {
                         return;
                     }
-                    let s = h.score + deq[krow[k as usize] as usize] + deq[prow[p as usize] as usize];
+                    let mut s = h.score + deq[krow[k as usize] as usize] + deq[prow[p as usize] as usize];
+                    if let Some(wt) = words {
+                        let (ks, ps) = &wst[base + j];
+                        s += ww * (wt.gain(ks, k) + wt.gain(ps, p));
+                    }
                     out.push(Cand { score: s, parent, letter: k });
                 };
                 match fixed {
@@ -194,6 +225,7 @@ pub fn solve(
 
         seen.clear();
         let mut next = Vec::with_capacity(beam.min(cands.len()));
+        let mut next_wst: Vec<(StreamState, StreamState)> = Vec::new();
         let mut back = Back { parent: Vec::with_capacity(next.capacity()), letter: Vec::with_capacity(next.capacity()) };
         for cd in &cands {
             let h = &hyps[cd.parent as usize];
@@ -201,11 +233,16 @@ pub fn solve(
             let p = dec(c, k);
             let kctx = (h.kctx * 26 + k as u64) % modk;
             let diverged = h.diverged || k < p;
-            let state = kctx * 2 + diverged as u64;
+            let khist = (h.khist * 26 + k as u64) % merge_mod;
+            let state = khist * 2 + diverged as u64;
             if !seen.insert_if_absent(state, 0) {
                 continue; // a better hypothesis already owns this state
             }
-            next.push(Hyp { kctx, pctx: (h.pctx * 26 + p as u64) % modk, score: cd.score, diverged });
+            if let Some(wt) = words {
+                let (ks, ps) = &wst[cd.parent as usize];
+                next_wst.push((wt.push(ks, k), wt.push(ps, p)));
+            }
+            next.push(Hyp { kctx, khist, pctx: (h.pctx * 26 + p as u64) % modk, score: cd.score, diverged });
             back.parent.push(cd.parent);
             back.letter.push(k);
             if next.len() == beam {
@@ -213,6 +250,7 @@ pub fn solve(
             }
         }
         hyps = next;
+        wst = next_wst;
         backs.push(back);
 
         if let Some(cb) = on_step.as_deref_mut() {

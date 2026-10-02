@@ -34,4 +34,4 @@ jobs:
       - name: Train held-out model
         run: cargo run --release -- train --exclude 1342.txt,2701.txt,84.txt --out bench/holdout.cklm
       - name: Benchmark
-        run: cargo run --release -- bench run --model bench/holdout.cklm --beam 3000 --min-acc 60
+        run: cargo run --release -- bench run --model bench/holdout.cklm --beam 3000 --min-acc 70

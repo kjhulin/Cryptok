@@ -40,7 +40,7 @@ cryptok score "some text"                      # language-model score
 ## Releases and CI
 
 GitHub Actions runs build + tests on Linux, macOS and Windows for every PR, plus an accuracy gate
-(`cryptok bench run --min-acc 60`) that fails if running-key accuracy regresses. Pushing a `v*` tag
+(`cryptok bench run --min-acc 70`) that fails if running-key accuracy regresses. Pushing a `v*` tag
 builds per-platform archives (binary, corpus, word list) and a pre-trained `cryptok.cklm` model and
 attaches them to a GitHub release.
 
@@ -63,6 +63,7 @@ Test ciphers are generated from books held out of training. Accuracy counts a po
 ## How it works
 
 - **Language model** (`crates/core/src/lm.rs`): order-6 character model with interpolated Kneser–Ney smoothing, trained on Project Gutenberg texts with licence boilerplate stripped. Every stored context has a full row of quantised log-probabilities, so scoring a letter is one hash lookup.
+- **Word model** (`crates/core/src/words.rs`): word frequencies from the corpus. During the beam search every hypothesis tracks the best word segmentation of its key and plaintext so far, and new letters are scored by how much they improve it (weight `--word-weight`, default 0.3; 0 turns it off). The character model cannot see spaces; this adds the information that `REDSHIRTENGINEER` is words. On the 60-case benchmark it lifts mean accuracy from 80.1% to ~84% (DEF CON 23 blind: 45% to 77%), at about 3.5x the time per cipher. Results are displayed with the discovered word breaks.
 - **RKC solver** (`crates/core/src/rkc.rs`): Viterbi beam search over (key, plaintext) pairs that merges hypotheses sharing the same last 6 key letters, prunes key/plaintext mirror duplicates, uses back-pointers, and expands candidates on all cores.
 
 ## Layout
