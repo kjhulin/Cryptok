@@ -4,6 +4,7 @@ use cryptok_core::words::WordModel;
 use cryptok_core::lm::LangModel;
 use cryptok_core::rkc::{self, RkcOptions, StepInfo};
 use cryptok_core::text::{enc, scrub, strip_gutenberg, unscrub};
+mod ocr;
 mod serve;
 
 use std::collections::HashMap;
@@ -16,8 +17,8 @@ const USAGE: &str = "\
 Cryptok Code Cracker 2.0
 
 USAGE:
-  cryptok serve  [--model FILE] [--sources DIR_OR_FILE,...] [--port 8077] [--no-open]
-                 (web UI in your browser)
+  cryptok serve  [--model FILE] [--sources DIR_OR_FILE,...] [--port 8077] [--host 127.0.0.1] [--no-open]
+                 (web UI in your browser; --host 0.0.0.0 lets a phone on your network open it)
   cryptok train  [--corpus DIR] [--order N] [--out FILE] [--exclude a.txt,b.txt]
   cryptok eval   [--model FILE] [--corpus DIR] --files a.txt,b.txt
                  (held-out cross-entropy in bits per letter; lower is better)
@@ -58,6 +59,10 @@ USAGE:
                   rail, route, columnar; autokey, hill, playfair, bifid only as the last step)
   cryptok decode --kind KIND TEXT...
                  (KIND: morse, a1z26, baconian, baconian26, polybius, binary, hex)
+  cryptok ocr    [--psm 6] [--digits] [--lang eng] [--raw] IMAGE
+                 (read cipher text from a photo or scan with Tesseract; prints the cleaned text,
+                  e.g. cryptok analyze $(cryptok ocr page.jpg); --psm 7 = a single line,
+                  11 = scattered text. Needs the `tesseract` program installed.)
   cryptok contest run [--model FILE] [--cases bench/contests.tsv] [--only id,id,...] [--exhaustive]
                  [--rkc-beam N] [--word-weight W] [--pass 0.9] [--out results.tsv] [--verbose]
                  (run every solver automatically on contest ciphers with known answers and
@@ -78,7 +83,7 @@ struct Args {
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
-    const SWITCHES: &[&str] = &["quiet", "help", "no-open", "double", "exhaustive", "verbose"];
+    const SWITCHES: &[&str] = &["quiet", "help", "no-open", "double", "exhaustive", "verbose", "digits", "raw"];
     let mut a = Args { flags: HashMap::new(), switches: vec![], pos: vec![] };
     let mut i = 0;
     while i < args.len() {
@@ -142,6 +147,7 @@ fn main() -> ExitCode {
         "hill" => parse(&argv[1..]).and_then(|a| cmd_hill(&a)),
         "chain" => parse(&argv[1..]).and_then(|a| cmd_chain(&a)),
         "decode" => parse(&argv[1..]).and_then(|a| cmd_decode(&a)),
+        "ocr" => parse(&argv[1..]).and_then(|a| cmd_ocr(&a)),
         "contest" => match argv.get(1).map(String::as_str) {
             Some("run") => parse(&argv[2..]).and_then(|a| cmd_contest_run(&a)),
             _ => Err("usage: cryptok contest run [--cases FILE] ...".into()),
@@ -594,6 +600,19 @@ fn cmd_contest_run(a: &Args) -> Result<(), String> {
     Ok(())
 }
 
+fn cmd_ocr(a: &Args) -> Result<(), String> {
+    let path = a.pos.first().ok_or("usage: cryptok ocr [--psm N] [--digits] IMAGE")?;
+    let opt = ocr::OcrOptions { psm: a.num("psm", 6)? as u32, allow_digits: a.has("digits"), lang: a.get("lang", "eng") };
+    let r = ocr::ocr_file(Path::new(path), &opt)?;
+    if a.has("raw") {
+        println!("{}", r.raw.trim_end());
+        return Ok(());
+    }
+    eprintln!("{} letters read, {} stray characters dropped. Check the text against the image: one wrong letter breaks key and crib alignment.", r.cleaned.letters, r.cleaned.dropped);
+    println!("{}", r.cleaned.text);
+    Ok(())
+}
+
 fn cmd_decode(a: &Args) -> Result<(), String> {
     let kind = a.get("kind", "");
     let out = cryptok_core::decode::decode(&kind, &a.pos.join(" ")).ok_or(format!("--kind must be one of: {}", cryptok_core::decode::KINDS))?;
@@ -610,8 +629,10 @@ fn cmd_serve(a: &Args) -> Result<(), String> {
     let quad = lm.dense(4.min(lm.order() + 1));
     let port = a.num("port", 8077)? as u16;
     let words = word_setup(a, "")?.map(|w| (w.model, w.trie, w.weight));
-    let state = serve::ServerState { lm, quad, sources, model_path: a.get("model", "cryptok.cklm"), words };
-    serve::run(state, port, !a.has("no-open"))
+    let ocr = ocr::tesseract_available();
+    eprintln!("{}", if ocr { "OCR: tesseract found (image upload uses it)" } else { "OCR: tesseract not installed; the browser will use Tesseract.js instead (needs internet)" });
+    let state = serve::ServerState { lm, quad, sources, model_path: a.get("model", "cryptok.cklm"), words, ocr };
+    serve::run(state, &a.get("host", "127.0.0.1"), port, !a.has("no-open"))
 }
 
 fn cmd_crib(a: &Args) -> Result<(), String> {

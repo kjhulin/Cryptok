@@ -20,6 +20,8 @@ cryptok train          # once: learns corpus/ -> cryptok.cklm (~5 s, ~95 MB)
 cryptok serve          # opens the web UI at http://127.0.0.1:8077/
 ```
 
+**Reading ciphertext from a picture.** Under the ciphertext box, *Scan image…* reads an uploaded picture or scan (you can also drop or paste one), *Take photo* opens a phone's camera, and *Use webcam* takes a still from a computer camera. The recognised text lands in the ciphertext box with the picture beside it; check it before solving, because one misread letter shifts every key and crib (I/J, O/Q and U/V are the usual culprits, and clean, well-lit, straight-on shots work far better than angled photos). OCR uses the `tesseract` program when it is installed (`apt install tesseract-ocr`, `brew install tesseract`, or the Windows installer), otherwise the browser falls back to Tesseract.js, which needs internet the first time. Choose *One line* or *Scattered text* if a block layout misreads. From the command line: `cryptok ocr photo.jpg`, e.g. `cryptok analyze $(cryptok ocr photo.jpg)`. To use a phone on your network, start `cryptok serve --host 0.0.0.0` (anyone on that network can then use the server, so only do this on one you trust); browsers only allow the live webcam on localhost or https, but *Take photo* works over plain http.
+
 The web UI has three tabs:
 
 - **Running key** — solve, pin letters on the worksheet (type in either stream; the other follows), place cribs, drag across a result to pin that stretch, solve again.

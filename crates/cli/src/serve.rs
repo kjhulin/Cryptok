@@ -1,6 +1,7 @@
 //! `cryptok serve` — a small local web server for the browser UI.
 //!
-//! Dependency-free: std `TcpListener`, one thread per connection, GET requests only.
+//! Dependency-free: std `TcpListener`, one thread per connection. Everything is GET except
+//! `POST /api/ocr` (an image upload).
 //! Long-running solvers stream progress with Server-Sent Events; closing the page
 //! (or pressing Stop) drops the connection, which cancels the search.
 
@@ -24,11 +25,21 @@ pub struct ServerState {
     pub model_path: String,
     /// Word model, its trie and the word-score weight (None = character model only).
     pub words: Option<(cryptok_core::words::WordModel, cryptok_core::words::WordTrie, f32)>,
+    /// The `tesseract` program is installed (server-side OCR available).
+    pub ocr: bool,
 }
 
-pub fn run(state: ServerState, port: u16, open: bool) -> Result<(), String> {
-    let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|e| format!("cannot listen on port {port}: {e}"))?;
-    let url = format!("http://127.0.0.1:{port}/");
+pub fn run(state: ServerState, host: &str, port: u16, open: bool) -> Result<(), String> {
+    let listener = TcpListener::bind((host, port)).map_err(|e| format!("cannot listen on {host}:{port}: {e}"))?;
+    let local = host == "127.0.0.1" || host == "localhost" || host == "::1";
+    if !local {
+        eprintln!(
+            "warning: listening on {host}: anyone who can reach this port can use the solvers and the OCR upload. \
+             Only do this on a network you trust. Browsers also withhold webcam access on plain http except on localhost; \
+             the phone 'Take photo' button still works."
+        );
+    }
+    let url = format!("http://{}:{port}/", if local { "127.0.0.1" } else { host });
     println!("Cryptok Code Cracker is running at {url}  (Ctrl-C to stop)");
     if open {
         open_browser(&url);
@@ -59,9 +70,19 @@ fn open_browser(url: &str) {
 
 // ------------------------------------------------------------------ HTTP plumbing
 
+/// Largest image upload accepted (a 12-megapixel phone photo is about 5 MB).
+const MAX_UPLOAD: usize = 25 * 1024 * 1024;
+
 struct Request {
+    method: String,
     path: String,
     query: Vec<(String, String)>,
+    /// `X-Cryptok` request header present. A cross-site page cannot send it without a CORS
+    /// preflight, which this server never grants, so it guards the POST endpoint.
+    custom_header: bool,
+    body: Vec<u8>,
+    /// The request could not be read (bad length, oversized body).
+    error: Option<&'static str>,
 }
 
 impl Request {
@@ -100,17 +121,22 @@ fn read_request(stream: &TcpStream) -> Option<Request> {
     let mut r = BufReader::new(stream);
     let mut line = String::new();
     r.read_line(&mut line).ok()?;
-    // Drain headers.
+    let (mut content_length, mut custom_header) = (0usize, false);
     loop {
         let mut h = String::new();
         if r.read_line(&mut h).ok()? == 0 || h == "\r\n" || h == "\n" {
             break;
         }
+        if let Some((k, v)) = h.split_once(':') {
+            match k.trim().to_ascii_lowercase().as_str() {
+                "content-length" => content_length = v.trim().parse().unwrap_or(usize::MAX),
+                "x-cryptok" => custom_header = true,
+                _ => {}
+            }
+        }
     }
     let mut parts = line.split_whitespace();
-    if parts.next()? != "GET" {
-        return Some(Request { path: "!method".into(), query: vec![] });
-    }
+    let method = parts.next()?.to_string();
     let target = parts.next()?;
     let (path, qs) = target.split_once('?').unwrap_or((target, ""));
     let query = qs
@@ -121,7 +147,21 @@ fn read_request(stream: &TcpStream) -> Option<Request> {
             (url_decode(k), url_decode(v))
         })
         .collect();
-    Some(Request { path: path.to_string(), query })
+    let mut req = Request { method: method.clone(), path: path.to_string(), query, custom_header, body: vec![], error: None };
+    if method == "POST" {
+        if content_length > MAX_UPLOAD {
+            req.error = Some("upload too large (limit 25 MB)");
+        } else {
+            let mut body = vec![0u8; content_length];
+            if std::io::Read::read_exact(&mut r, &mut body).is_err() {
+                req.error = Some("incomplete upload");
+            }
+            req.body = body;
+        }
+    } else if method != "GET" {
+        req.path = "!method".into();
+    }
+    Some(req)
 }
 
 fn respond(mut s: &TcpStream, status: &str, ctype: &str, body: &str) -> std::io::Result<()> {
@@ -184,20 +224,62 @@ impl Sse {
 
 // ------------------------------------------------------------------ routes
 
+/// `POST /api/ocr?psm=6&digits=0` with the raw image bytes as the body.
+fn api_ocr(stream: &TcpStream, st: &ServerState, req: &Request) -> std::io::Result<()> {
+    let fail = |status: &str, msg: &str| respond(stream, status, "application/json", &format!("{{\"error\":{}}}", json_str(msg)));
+    if req.method != "POST" {
+        return fail("405 Method Not Allowed", "send the image with POST");
+    }
+    if !req.custom_header {
+        return fail("403 Forbidden", "missing X-Cryptok header");
+    }
+    if let Some(e) = req.error {
+        return fail("400 Bad Request", e);
+    }
+    if !st.ocr {
+        return fail("501 Not Implemented", "tesseract is not installed on the server");
+    }
+    let opt = crate::ocr::OcrOptions {
+        psm: req.num("psm", 6).clamp(0, 13) as u32,
+        allow_digits: req.q("digits") == "1",
+        lang: "eng".into(),
+    };
+    match crate::ocr::ocr_bytes(&req.body, &opt) {
+        Ok(r) => respond(
+            stream,
+            "200 OK",
+            "application/json",
+            &format!(
+                "{{\"text\":{},\"raw\":{},\"letters\":{},\"dropped\":{},\"engine\":\"tesseract\"}}",
+                json_str(&r.cleaned.text),
+                json_str(&r.raw),
+                r.cleaned.letters,
+                r.cleaned.dropped
+            ),
+        ),
+        Err(e) => fail("422 Unprocessable Entity", &e),
+    }
+}
+
 fn handle(stream: TcpStream, st: &ServerState) -> std::io::Result<()> {
     let Some(req) = read_request(&stream) else { return Ok(()) };
+    if req.method == "POST" && req.path != "/api/ocr" {
+        return respond(&stream, "405 Method Not Allowed", "text/plain", "POST is only used for /api/ocr");
+    }
     match req.path.as_str() {
+        "/api/ocr" => api_ocr(&stream, st, &req),
         "/" | "/index.html" => respond(&stream, "200 OK", "text/html; charset=utf-8", INDEX_HTML),
         "/api/info" => {
             let letters: usize = st.sources.iter().map(|s| s.letters.len()).sum();
             let names: Vec<String> = st.sources.iter().map(|s| json_str(&s.name)).collect();
             let body = format!(
-                "{{\"order\":{},\"model\":{},\"sources\":[{}],\"source_letters\":{},\"threads\":{}}}",
+                "{{\"order\":{},\"model\":{},\"sources\":[{}],\"source_letters\":{},\"threads\":{},\"ocr\":{}}}",
                 st.lm.order(),
                 json_str(&st.model_path),
                 names.join(","),
                 letters,
-                std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+                std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
+                st.ocr
             );
             respond(&stream, "200 OK", "application/json", &body)
         }

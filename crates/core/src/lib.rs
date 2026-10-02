@@ -14,6 +14,7 @@ pub mod decode;
 pub mod known;
 pub mod lm;
 pub mod map;
+pub mod ocr;
 pub mod periodic;
 pub mod polygraphic;
 pub mod rkc;
