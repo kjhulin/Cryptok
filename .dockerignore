@@ -2,5 +2,4 @@ target
 .git
 bench/private
 bench/holdout.cklm
-*.cklm
 .github

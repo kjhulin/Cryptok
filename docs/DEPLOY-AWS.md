@@ -19,9 +19,17 @@ Internet ──HTTPS 443──> ALB (ACM certificate, WAF) ──HTTP 8077──
   rate limiting, because behind a load balancer every client shares the ALB's address.
 * **Target group health check:** `GET /healthz` on port 8077, expecting `200` (it needs no
   credentials and reveals nothing).
-* **Compute:** ECS Fargate or one EC2 instance with at least 2 vCPU and **2 GB RAM** (the model
-  takes about 350 MB and each running search adds more; two concurrent searches peaked
-  near 400 MB in testing, with headroom for OCR). Pick more CPU for faster solves.
+* **Compute:** ECS Fargate (0.5 vCPU / 1 GB is the smallest size with 512 MB+ headroom; 1 vCPU
+  searches faster) or a small EC2 instance. The image starts with `--lean`, sized for **512 MB**:
+  about 180 MB idle, and a stress battery (a 1,500-letter running-key search, known-text search,
+  Vigenère and transposition requests, a 12-megapixel OCR upload and four simultaneous requests,
+  one of which runs while the rest get `503`) peaked at **about 300 MB** including Tesseract.
+  Without `--lean` (two concurrent jobs, a 100,000 beam, 2,000 letters) budget 1 GB.
+* **Building the image needs more than running it.** Training the language model peaks at about
+  420 MB (it was 845 MB, which is what ran a small build host out of memory), on top of the Rust
+  compiler. Build on a host with 2 GB+, add swap, or: `--build-arg MODEL_ORDER=5` (172 MB to
+  train, a 23 MB model, about 2.6 points less accurate on the held-out benchmark), or train the model
+  elsewhere and pass `--build-arg MODEL_FILE=cryptok.cklm`.
 * **Logs:** send stdout/stderr to CloudWatch Logs. The server logs one line per request
   (client address, method, path; never the query string, which holds the ciphertext) and every
   authentication failure.
@@ -53,7 +61,7 @@ Task definition essentials:
 * `secrets`: `CRYPTOK_AUTH` from Secrets Manager.
 * `readonlyRootFilesystem: true`. The app writes no files (uploaded photos are piped to Tesseract
   in memory and never stored), so no writable volume is needed. Run as the image's non-root user,
-  drop all Linux capabilities, `memory: 2048`, `cpu: 2048` or more.
+  drop all Linux capabilities, `memory: 1024` (512 works with `--lean`), `cpu: 512` or more.
 * No task role permissions beyond logging.
 
 ## EC2 + systemd (alternative)
@@ -70,7 +78,7 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=false        # the server reads /dev/urandom for nonces
-MemoryMax=2G
+MemoryMax=512M
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_INET AF_INET6
 SystemCallFilter=@system-service
@@ -85,10 +93,11 @@ Anything non-loopback uses these defaults; override with the flags shown in `cry
 | Limit | Default | Flag |
 |---|---|---|
 | Concurrent connections | 64 | `--max-conns` |
-| Concurrent searches / OCR jobs (others get `503`) | 2 | `--max-jobs` |
+| Concurrent searches / OCR jobs (others get `503`) | 2 (`--lean`: 1) | `--max-jobs` |
 | Wall-clock time for a streamed search | 120 s | `--job-timeout` |
-| Cipher length | 2,000 letters | `--max-letters` |
-| Running-key beam | 100,000 | `--max-beam` |
+| Cipher length | 2,000 letters (`--lean`: 1,500) | `--max-letters` |
+| Running-key beam | 100,000 (`--lean`: 50,000) | `--max-beam` |
+| Traceback memory per running-key search | 192 MB (`--lean`: 96 MB); the beam narrows to fit | `--job-memory-mb` |
 | Candidate keywords | 500 | `--max-keywords` |
 | Image upload | 25 MB, 12,000 px a side, 16 megapixels, 40 s of OCR; held in memory only, never stored | fixed |
 

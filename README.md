@@ -56,6 +56,10 @@ cryptok playfair CIPHER
 
 `cryptok contest run` runs the analyser and every plausible solver automatically on each cipher in `bench/contests.tsv`, ranks the attempts by description length (plaintext fluency minus the cost of the key), and scores the winner against the known plaintext. `--verbose` lists every attempt, `--exhaustive` ignores the analyser's pruning, `--out FILE` saves a results table (the last baseline is `bench/contest-results.tsv`). The file holds DEF CON 20 and 23, Kryptos K1-K3 and ten synthetic contest-style puzzles (`bench/gen_synthetic.py`); add other contests as new rows. Only ciphertexts with a published solution belong there.
 
+### Memory
+
+`cryptok serve --lean` fits in 512 MB (about 180 MB idle, about 300 MB at peak under a stress test). Running-key search memory no longer grows with beam × cipher length (unreachable traceback entries are released, with identical results), model loading and training stream instead of holding a second copy (training peaks at about 420 MB, was 845 MB; `train --order 5` needs 172 MB and gives a 23 MB model that is about 2.6 points less accurate on the held-out benchmark).
+
 ### Deploying
 
 Listening on anything but localhost needs `CRYPTOK_AUTH`, applies conservative request, time and size limits, checks the `Host` header, and sends a strict content-security policy. Put it behind a TLS-terminating proxy: see [docs/DEPLOY-AWS.md](docs/DEPLOY-AWS.md) (with a `Dockerfile`) or, for nginx at a sub-path with Google sign-in, [docs/NGINX-SSO.md](docs/NGINX-SSO.md) and the audit in [SECURITY.md](SECURITY.md).

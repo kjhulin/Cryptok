@@ -115,6 +115,11 @@ impl LangModel {
     /// Train from a directory of text files (Gutenberg boilerplate is stripped).
     /// Files whose names appear in `exclude` are skipped.
     pub fn train_dir(dir: &Path, order: usize, exclude: &[String]) -> io::Result<(Self, TrainStats)> {
+        Self::train_dir_pruned(dir, order, exclude, 1)
+    }
+
+    /// [`train_dir`](Self::train_dir) with pruning of rare highest-order n-grams.
+    pub fn train_dir_pruned(dir: &Path, order: usize, exclude: &[String], prune_below: u32) -> io::Result<(Self, TrainStats)> {
         let mut names: Vec<_> = fs::read_dir(dir)?
             .filter_map(|e| e.ok())
             .map(|e| e.path())
@@ -132,11 +137,19 @@ impl LangModel {
             let s = String::from_utf8_lossy(&buf);
             texts.push(scrub(strip_gutenberg(&s)));
         }
-        Ok(Self::train(&texts, order))
+        Ok(Self::train_pruned(&texts, order, prune_below))
     }
 
     /// Train from pre-scrubbed letter sequences.
     pub fn train(texts: &[Vec<u8>], order: usize) -> (Self, TrainStats) {
+        Self::train_pruned(texts, order, 1)
+    }
+
+    /// Like [`train`](Self::train), but drops highest-order n-grams seen fewer than
+    /// `prune_below` times (1 = keep everything). Contexts that only ever appeared once
+    /// then back off to the next lower order, which shrinks the model (and its memory)
+    /// at a small cost in accuracy.
+    pub fn train_pruned(texts: &[Vec<u8>], order: usize, prune_below: u32) -> (Self, TrainStats) {
         assert!((1..=MAX_ORDER).contains(&order), "order must be 1..={MAX_ORDER}");
         let k = order;
         let m = k + 1;
@@ -156,6 +169,11 @@ impl LangModel {
             }
         }
 
+        if prune_below > 1 {
+            top.retain(|_, c| *c >= prune_below);
+            top.shrink_to_fit();
+        }
+
         // 2. Kneser–Ney continuation counts for lower orders:
         //    cnt[L][g] = number of distinct letters x such that x·g was seen.
         let mut cnt: Vec<FxHashMap<u64, u32>> = (0..=k).map(|_| FxHashMap::default()).collect();
@@ -168,16 +186,23 @@ impl LangModel {
             cnt[l] = lower;
         }
 
-        // 3. Build probability rows level by level (low to high), interpolating with the level below.
+        // 3. Build probability rows level by level (low to high), interpolating with the level
+        //    below. Rows are produced one context at a time straight from the sorted n-gram
+        //    list, and each level's count table is freed once used, so training never holds a
+        //    full-size table of raw counts next to a full-size table of probabilities.
         struct Build {
             map: U64Map,
+            /// Full-precision rows, kept for levels below the top (needed to interpolate the
+            /// next level); the top level is quantised as it is produced.
             probs: Vec<f32>,
+            rows: Vec<u8>,
         }
+        let quant = |p: f32| (-(p.max(1e-30)).ln() / STEP).round().clamp(0.0, 255.0) as u8;
         let mut built: Vec<Build> = Vec::with_capacity(k + 1);
         let mut discounts = Vec::with_capacity(k + 1);
         let mut contexts_per_level = Vec::with_capacity(k + 1);
         for l in 0..=k {
-            let counts = &cnt[l];
+            let counts = std::mem::take(&mut cnt[l]);
             // Modified Kneser–Ney (Chen & Goodman): separate discounts for counts 1, 2, 3+.
             let mut nn = [0u64; 5];
             for &c in counts.values() {
@@ -195,80 +220,58 @@ impl LangModel {
             let disc = |c: u32| -> f64 { dk[(c as usize).min(3)] };
             discounts.push(dk[1]);
 
-            // Gather counts per context.
-            let mut map = U64Map::with_capacity(counts.len() / 4 + 1);
-            let mut raw: Vec<u32> = Vec::new();
+            // Sorted n-grams group contiguously by context (g = context * 26 + next letter).
             let mut keys: Vec<u64> = counts.keys().copied().collect();
             keys.sort_unstable(); // deterministic layout
-            for g in keys {
-                let c = counts[&g];
-                let h = g / 26;
-                let w = (g % 26) as usize;
-                let idx = match map.get(h) {
-                    Some(i) => i as usize,
-                    None => {
-                        let i = raw.len() / ALPHABET;
-                        map.insert(h, i as u32);
-                        raw.resize(raw.len() + ALPHABET, 0);
-                        i
-                    }
-                };
-                raw[idx * ALPHABET + w] = c;
-            }
-            let nctx = raw.len() / ALPHABET;
+            let nctx = keys.windows(2).filter(|w| w[0] / 26 != w[1] / 26).count() + usize::from(!keys.is_empty());
             contexts_per_level.push(nctx);
-
-            let mut probs = vec![0f32; raw.len()];
-            // Context keys by index, needed to find the lower-order row.
-            let mut ctx_of = vec![0u64; nctx];
-            {
-                // Rebuild index -> context mapping.
-                for g in cnt[l].keys() {
-                    let h = g / 26;
-                    ctx_of[map.get(h).unwrap() as usize] = h;
+            let top_level = l == k;
+            let mut map = U64Map::with_capacity(nctx + 1);
+            let mut probs: Vec<f32> = Vec::with_capacity(if top_level { 0 } else { nctx * ALPHABET });
+            let mut rows: Vec<u8> = Vec::with_capacity(if top_level { nctx * ALPHABET } else { 0 });
+            let mut i = 0;
+            while i < keys.len() {
+                let h = keys[i] / 26;
+                let mut row = [0u32; ALPHABET];
+                while i < keys.len() && keys[i] / 26 == h {
+                    row[(keys[i] % 26) as usize] = counts[&keys[i]];
+                    i += 1;
                 }
-            }
-            for i in 0..nctx {
-                let row = &raw[i * ALPHABET..(i + 1) * ALPHABET];
+                let ctx_index = map.len() as u32;
+                map.insert(h, ctx_index);
                 let s: u64 = row.iter().map(|&c| c as u64).sum();
-                let t = row.iter().filter(|&&c| c > 0).count() as f64;
                 let s = s as f64;
-                let lower: Vec<f32> = if l == 0 {
-                    vec![1.0 / 26.0; ALPHABET]
-                } else {
-                    let h = ctx_of[i];
+                let mut lower = [1.0f32 / 26.0; ALPHABET];
+                if l > 0 {
                     // Longest stored suffix in lower levels.
                     let mut ll = l - 1;
                     loop {
                         if let Some(j) = built[ll].map.get(h % pow[ll]) {
                             let j = j as usize * ALPHABET;
-                            break built[ll].probs[j..j + ALPHABET].to_vec();
+                            lower.copy_from_slice(&built[ll].probs[j..j + ALPHABET]);
+                            break;
                         }
                         ll -= 1;
                     }
-                };
-                let _ = t;
+                }
                 let gamma: f64 = row.iter().filter(|&&c| c > 0).map(|&c| disc(c)).sum::<f64>() / s;
                 for w in 0..ALPHABET {
                     let c = row[w] as f64;
-                    let p = ((c - if row[w] > 0 { disc(row[w]) } else { 0.0 }).max(0.0) / s) + gamma * lower[w] as f64;
-                    probs[i * ALPHABET + w] = p as f32;
+                    let p = (((c - if row[w] > 0 { disc(row[w]) } else { 0.0 }).max(0.0) / s) + gamma * lower[w] as f64) as f32;
+                    if top_level {
+                        rows.push(quant(p));
+                    } else {
+                        probs.push(p);
+                    }
                 }
             }
-            built.push(Build { map, probs });
+            built.push(Build { map, probs, rows });
         }
 
-        // 4. Quantise.
+        // 4. Quantise the lower levels (the top level already is).
         let levels = built
             .into_iter()
-            .map(|b| Level {
-                map: b.map,
-                rows: b
-                    .probs
-                    .iter()
-                    .map(|&p| (-(p.max(1e-30)).ln() / STEP).round().clamp(0.0, 255.0) as u8)
-                    .collect(),
-            })
+            .map(|b| Level { map: b.map, rows: if b.rows.is_empty() { b.probs.iter().map(|&p| quant(p)).collect() } else { b.rows } })
             .collect();
 
         let lm = LangModel { order: k, levels, deq: deq_table(), pow: pow26(k) };

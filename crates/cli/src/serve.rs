@@ -19,6 +19,7 @@ use cryptok_core::text::{scrub, unscrub};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -58,6 +59,17 @@ pub fn is_loopback(host: &str) -> bool {
 impl Config {
     /// `public` forces the conservative profile even on a loopback bind: use it behind a
     /// reverse proxy on the same machine.
+    /// Settings for a small machine (about 512 MB): one search at a time, narrower beam, tighter
+    /// limits. Combine with `--public` or a non-loopback `--host`.
+    pub fn lean(mut self) -> Self {
+        self.max_jobs = 1;
+        self.max_conns = self.max_conns.min(32);
+        self.max_beam = self.max_beam.min(50_000);
+        self.max_letters = self.max_letters.min(1_500);
+        self.job_memory_mb = if self.job_memory_mb == 0 { 96 } else { self.job_memory_mb.min(96) };
+        self
+    }
+
     pub fn for_host(host: &str, port: u16, public: bool) -> Self {
         let local = is_loopback(host) && !public;
         Config {
@@ -77,10 +89,47 @@ impl Config {
     }
 }
 
+/// Known-text sources: kept in memory, or (lean mode) reloaded from disk for each search and
+/// freed afterwards, which saves their ~30 MB while idle.
+pub enum SourceStore {
+    Resident(Vec<Source>),
+    OnDemand { paths: Vec<PathBuf>, names: Vec<String>, letters: usize },
+}
+
+impl SourceStore {
+    pub fn new(sources: Vec<Source>, paths: Vec<PathBuf>, on_demand: bool) -> Self {
+        if on_demand {
+            let names = sources.iter().map(|s| s.name.clone()).collect();
+            let letters = sources.iter().map(|s| s.letters.len()).sum();
+            SourceStore::OnDemand { paths, names, letters } // `sources` is dropped here
+        } else {
+            SourceStore::Resident(sources)
+        }
+    }
+    fn names(&self) -> Vec<String> {
+        match self {
+            SourceStore::Resident(v) => v.iter().map(|s| s.name.clone()).collect(),
+            SourceStore::OnDemand { names, .. } => names.clone(),
+        }
+    }
+    fn letters(&self) -> usize {
+        match self {
+            SourceStore::Resident(v) => v.iter().map(|s| s.letters.len()).sum(),
+            SourceStore::OnDemand { letters, .. } => *letters,
+        }
+    }
+    fn with<T>(&self, f: impl FnOnce(&[Source]) -> T) -> std::io::Result<T> {
+        match self {
+            SourceStore::Resident(v) => Ok(f(v)),
+            SourceStore::OnDemand { paths, .. } => Ok(f(&known::load_sources(paths)?)),
+        }
+    }
+}
+
 pub struct ServerState {
     pub lm: LangModel,
     pub quad: DenseNgram,
-    pub sources: Vec<Source>,
+    pub sources: SourceStore,
     pub model_path: String,
     /// Word model, its trie and the word-score weight (None = character model only).
     pub words: Option<(cryptok_core::words::WordModel, cryptok_core::words::WordTrie, f32)>,
@@ -95,7 +144,7 @@ impl ServerState {
     pub fn new(
         lm: LangModel,
         quad: DenseNgram,
-        sources: Vec<Source>,
+        sources: SourceStore,
         model_path: String,
         words: Option<(cryptok_core::words::WordModel, cryptok_core::words::WordTrie, f32)>,
         ocr: bool,
@@ -628,8 +677,8 @@ fn route(stream: TcpStream, st: &ServerState, req: &Request) -> std::io::Result<
         "/favicon.ico" => respond(&stream, "204 No Content", "text/plain", ""),
         "/" | "/index.html" => respond_index(&stream, st),
         "/api/info" => {
-            let letters: usize = st.sources.iter().map(|s| s.letters.len()).sum();
-            let names: Vec<String> = st.sources.iter().map(|s| json_str(&s.name)).collect();
+            let letters: usize = st.sources.letters();
+            let names: Vec<String> = st.sources.names().iter().map(|n| json_str(n)).collect();
             // Only the file name of the model, never a server path.
             let model = std::path::Path::new(&st.model_path).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
             let body = format!(
@@ -851,7 +900,11 @@ fn api_known(stream: TcpStream, st: &ServerState, req: &Request) -> std::io::Res
             sse.send("progress", &format!("{{\"pct\":{pct}}}"));
         }
     };
-    let hits = with_deadline(st, &sse, || known::search(&st.lm, &st.quad, &cipher, &st.sources, &opts, Some(&prog), Some(&sse.gone)));
+    let hits = with_deadline(st, &sse, || st.sources.with(|src| known::search(&st.lm, &st.quad, &cipher, src, &opts, Some(&prog), Some(&sse.gone))));
+    let Ok(hits) = hits else {
+        sse.send("failed", &json_str("The known texts could not be loaded on this server."));
+        return Ok(());
+    };
     if sse.gone.load(Ordering::Relaxed) {
         return Ok(());
     }

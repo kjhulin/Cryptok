@@ -55,8 +55,8 @@ echo "CRYPTOK_AUTH=nginx:$SECRET" | sudo tee /etc/cryptok/auth.env && sudo chmod
 printf 'nginx:%s' "$SECRET" | base64 -w0        # paste into cryptok-proxy.inc (Authorization line)
 ```
 
-The unit starts `cryptok serve --host 127.0.0.1 --public --allowed-host cryptok.space`.
-`--public` keeps the loopback bind but applies the conservative limits (2,000 letters, two
+The unit starts `cryptok serve --host 127.0.0.1 --public --lean --allowed-host cryptok.space`.
+`--lean` sizes the server for a 512 MB machine (about 180 MB idle, about 300 MB at peak in testing: one search at a time, known texts reloaded per search). `--public` keeps the loopback bind but applies the conservative limits (2,000 letters, two
 concurrent searches, 120 s per search, request log) and requires `--allowed-host`. The app also
 refuses any request that lacks the shared secret, so another process on the machine (or a
 server-side request forgery in a neighbouring site) cannot use it without nginx.
