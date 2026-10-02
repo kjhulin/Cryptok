@@ -48,7 +48,7 @@ struct Args {
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
-    const SWITCHES: &[&str] = &["quiet", "help", "no-open"];
+    const SWITCHES: &[&str] = &["quiet", "help", "no-open", "unigram", "trigram"];
     let mut a = Args { flags: HashMap::new(), switches: vec![], pos: vec![] };
     let mut i = 0;
     while i < args.len() {
@@ -150,7 +150,7 @@ fn cmd_train(a: &Args) -> Result<(), String> {
     let t = Instant::now();
     let (lm, st) = LangModel::train_dir(&corpus, order, &exclude).map_err(|e| e.to_string())?;
     let words_path = out.with_extension("words");
-    let wm = WordModel::from_corpus(&corpus, &exclude, 3).map_err(|e| e.to_string())?;
+    let wm = WordModel::from_corpus(&corpus, &exclude, 3, a.has("trigram")).map_err(|e| e.to_string())?;
     wm.save(&words_path).map_err(|e| format!("{}: {e}", words_path.display()))?;
     eprintln!("wrote {} ({} words)", words_path.display(), wm.vocab_size());
     let tt = t.elapsed().as_secs_f64();
@@ -518,7 +518,7 @@ fn cmd_bench_run(a: &Args) -> Result<(), String> {
 fn cmd_bench_diag(a: &Args, lm: &LangModel, cases: &[(String, Vec<u8>, Vec<u8>, Vec<u8>)]) -> Result<(), String> {
     let corpus = corpus_dirs(a);
     let excl: Vec<String> = a.get("word-exclude", "1342.txt,2701.txt,84.txt").split(',').filter(|s| !s.is_empty()).map(String::from).collect();
-    let wm = WordModel::from_corpus(&corpus, &excl, a.num("min-count", 3)? as u32).map_err(|e| e.to_string())?;
+    let wm = WordModel::from_corpus(&corpus, &excl, a.num("min-count", 3)? as u32, a.has("trigram")).map_err(|e| e.to_string())?;
     let opts = RkcOptions { beam: a.num("beam", 10_000)?, results: 1, threads: a.num("threads", 0)?, ..Default::default() };
     println!("{:>4} {:>5} {:>6} {:>9} {:>9} {:>9}", "id", "len", "acc%", "d_char", "d_word", "d_all(w=1)");
     let (mut cwin, mut wwin, mut awin, mut n) = (0, 0, 0, 0);
@@ -551,7 +551,7 @@ fn num_f32(a: &Args, k: &str, d: &str) -> Result<f32, String> {
 
 /// `default_exclude` lists corpus files left out of the word model (the benchmark holds books out).
 fn word_setup(a: &Args, default_exclude: &str) -> Result<Option<Words>, String> {
-    let weight = num_f32(a, "word-weight", "0.3")?;
+    let weight = num_f32(a, "word-weight", "0.4")?;
     if weight <= 0.0 {
         return Ok(None);
     }
@@ -566,9 +566,16 @@ fn word_setup(a: &Args, default_exclude: &str) -> Result<Option<Words>, String> 
             return Ok(None);
         }
         let excl: Vec<String> = a.get("word-exclude", default_exclude).split(',').filter(|s| !s.is_empty()).map(String::from).collect();
-        WordModel::from_corpus(&corpus, &excl, a.num("min-count", 3)? as u32).map_err(|e| e.to_string())?
+        WordModel::from_corpus(&corpus, &excl, a.num("min-count", 3)? as u32, a.has("trigram")).map_err(|e| e.to_string())?
+    };
+    let model = if a.has("unigram") {
+        model.without_bigrams()
+    } else if a.has("trigram") {
+        model
+    } else {
+        model.without_trigrams()
     };
     let trie = model.trie().with_oov(num_f32(a, "oov-base", "-4")?, num_f32(a, "oov-per", "-3.5")?);
-    eprintln!("word model: {} words in {:.2}s (weight {weight})", model.vocab_size(), t.elapsed().as_secs_f64());
+    eprintln!("word model: {} words, {} pairs, {} triples in {:.2}s (weight {weight})", model.vocab_size(), model.bigram_count(), model.trigram_count(), t.elapsed().as_secs_f64());
     Ok(Some(Words { model, trie, weight }))
 }
