@@ -296,42 +296,50 @@ impl LangModel {
         w.flush()
     }
 
+    /// Load a model file. Reads it level by level straight into its final structures, so
+    /// peak memory is the model plus one level's key block (not a second copy of the file).
     pub fn load(path: &Path) -> io::Result<Self> {
-        let data = fs::read(path)?;
         let bad = |m: &str| io::Error::new(io::ErrorKind::InvalidData, m.to_string());
-        let mut pos = 0usize;
-        let mut take = |n: usize| -> io::Result<&[u8]> {
-            if pos + n > data.len() {
+        let file = fs::File::open(path)?;
+        let size = file.metadata()?.len();
+        let mut r = io::BufReader::with_capacity(1 << 20, file);
+        let mut read_vec = |n: usize| -> io::Result<Vec<u8>> {
+            // Never trust a length from the file beyond what the file can hold.
+            if n as u64 > size {
                 return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated model file"));
             }
-            let s = &data[pos..pos + n];
-            pos += n;
-            Ok(s)
+            let mut v = vec![0u8; n];
+            r.read_exact(&mut v).map_err(|_| io::Error::new(io::ErrorKind::UnexpectedEof, "truncated model file"))?;
+            Ok(v)
         };
-        if take(4)? != MAGIC {
+        if read_vec(4)? != MAGIC {
             return Err(bad("not a cryptok language model file"));
         }
-        let ver = u32::from_le_bytes(take(4)?.try_into().unwrap());
+        let ver = u32::from_le_bytes(read_vec(4)?.try_into().unwrap());
         if ver != VERSION {
             return Err(bad(&format!("unsupported model version {ver}")));
         }
-        let order = u32::from_le_bytes(take(4)?.try_into().unwrap()) as usize;
+        let order = u32::from_le_bytes(read_vec(4)?.try_into().unwrap()) as usize;
         if !(1..=MAX_ORDER).contains(&order) {
             return Err(bad("invalid order"));
         }
-        let step = f32::from_le_bytes(take(4)?.try_into().unwrap());
+        let step = f32::from_le_bytes(read_vec(4)?.try_into().unwrap());
         if (step - STEP).abs() > 1e-6 {
             return Err(bad("unsupported quantisation step"));
         }
         let mut levels = Vec::with_capacity(order + 1);
         for _ in 0..=order {
-            let n = u64::from_le_bytes(take(8)?.try_into().unwrap()) as usize;
-            let kb = take(n * 8)?;
+            let n = u64::from_le_bytes(read_vec(8)?.try_into().unwrap()) as usize;
+            if n > (size as usize) / 8 {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "truncated model file"));
+            }
+            let kb = read_vec(n * 8)?;
             let mut map = U64Map::with_capacity(n);
             for (i, ch) in kb.chunks_exact(8).enumerate() {
                 map.insert(u64::from_le_bytes(ch.try_into().unwrap()), i as u32);
             }
-            let rows = take(n * ALPHABET)?.to_vec();
+            drop(kb);
+            let rows = read_vec(n * ALPHABET)?;
             levels.push(Level { map, rows });
         }
         if levels[0].map.get(0).is_none() {

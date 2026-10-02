@@ -65,7 +65,7 @@ const OCR_TIMEOUT: Duration = Duration::from_secs(40);
 /// Output we are willing to buffer from Tesseract.
 const OCR_MAX_OUTPUT: u64 = 1 << 20;
 const MAX_SIDE: u32 = 12_000;
-const MAX_PIXELS: u64 = 50_000_000;
+const MAX_PIXELS: u64 = 16_000_000;
 
 /// Where Tesseract reads the image from.
 enum Source<'a> {
@@ -210,7 +210,7 @@ pub fn ocr_bytes(bytes: &[u8], opt: &OcrOptions) -> Result<OcrResult, OcrError> 
     }
     let (w, h) = image_dimensions(bytes).ok_or(OcrError::public("the image header is damaged or unsupported"))?;
     if w == 0 || h == 0 || w > MAX_SIDE || h > MAX_SIDE || (w as u64) * (h as u64) > MAX_PIXELS {
-        return Err(OcrError::public("the image is too large (limit 12000 pixels a side, 50 megapixels)"));
+        return Err(OcrError::public("the image is too large (limit 12000 pixels a side, 16 megapixels)"));
     }
     run_tesseract(Source::Memory(bytes), opt)
 }

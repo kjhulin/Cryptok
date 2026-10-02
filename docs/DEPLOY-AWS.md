@@ -90,7 +90,7 @@ Anything non-loopback uses these defaults; override with the flags shown in `cry
 | Cipher length | 2,000 letters | `--max-letters` |
 | Running-key beam | 100,000 | `--max-beam` |
 | Candidate keywords | 500 | `--max-keywords` |
-| Image upload | 25 MB, 12,000 px a side, 50 megapixels, 40 s of OCR; held in memory only, never stored | fixed |
+| Image upload | 25 MB, 12,000 px a side, 16 megapixels, 40 s of OCR; held in memory only, never stored | fixed |
 
 ## Checklist before going live
 

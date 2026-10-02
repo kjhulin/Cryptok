@@ -36,11 +36,20 @@ pub struct RkcOptions {
     /// Number of trailing key letters that identify a state for merging
     /// (0 = the model order, or 10 when a word model is used). Must be at least the order.
     pub merge_len: usize,
+    /// Soft cap on the bytes of back-pointers kept for traceback (0 = unlimited). When the
+    /// search would exceed it, the beam is narrowed instead of the process growing without
+    /// bound. Back-pointers cost 5 bytes per hypothesis per step, but entries that no
+    /// surviving hypothesis descends from are released as the search goes (see
+    /// [`solve_words`]), so the cap rarely binds.
+    pub max_back_bytes: usize,
+    /// Keep every back-pointer instead of releasing unreachable ones. Gives identical results
+    /// (used by the tests); only worth enabling to debug.
+    pub keep_all_backpointers: bool,
 }
 
 impl Default for RkcOptions {
     fn default() -> Self {
-        RkcOptions { beam: 100_000, results: 10, key_hints: vec![], plain_hints: vec![], threads: 0, word_weight: 1.0, merge_len: 0 }
+        RkcOptions { beam: 100_000, results: 10, key_hints: vec![], plain_hints: vec![], threads: 0, word_weight: 1.0, merge_len: 0, max_back_bytes: 0, keep_all_backpointers: false }
     }
 }
 
@@ -152,7 +161,13 @@ pub fn solve_words(
     let mut hyps = vec![Hyp { kctx: 0, khist: 0, pctx: 0, score: 0.0, diverged: false }];
     // Word-segmentation state of (key, plaintext) per hypothesis; empty without a word model.
     let mut wst: Vec<(StreamState, StreamState)> = if words.is_some() { vec![(StreamState::new(), StreamState::new())] } else { vec![] };
-    let mut backs: Vec<Back> = Vec::with_capacity(n);
+    // Traceback memory is the big cost: 5 bytes x beam x steps. But the surviving hypotheses
+    // descend from very few ancestors a few steps back (typically two: the key/plaintext
+    // mirror pair), so back-pointer entries nothing alive descends from are dropped every
+    // few steps (`release_unreachable`). Exact: such entries can never appear in a traceback.
+    let mut backs: Vec<Back> = Vec::new();
+    let mut live_bytes = 0usize;
+    let mut beam = beam;
     let mut seen = U64Map::with_capacity(beam * 2);
     let mut cands: Vec<Cand> = Vec::new();
 
@@ -204,6 +219,15 @@ pub fn solve_words(
                         s.spawn(move || {
                             let mut v = Vec::with_capacity(ch.len() * 26);
                             expand(ch, ci * chunk, &mut v);
+                            // Only the best `2 * beam` of all candidates survive, so each part
+                            // can already discard everything below its own best `2 * beam`:
+                            // the merged set is 3x smaller and the later selection cheaper.
+                            let keep = (beam * 2).min(v.len());
+                            if v.len() > keep {
+                                v.select_nth_unstable_by(keep, |a, b| b.score.total_cmp(&a.score));
+                                v.truncate(keep);
+                                v.shrink_to_fit();
+                            }
                             v
                         })
                     })
@@ -251,7 +275,14 @@ pub fn solve_words(
         }
         hyps = next;
         wst = next_wst;
+        live_bytes += back.parent.len() * 5;
         backs.push(back);
+        if !opts.keep_all_backpointers && backs.len() % RELEASE_EVERY == 0 {
+            live_bytes -= release_unreachable(&mut backs);
+        }
+        if opts.max_back_bytes > 0 && live_bytes > opts.max_back_bytes && beam > MIN_BEAM {
+            beam = (beam * 4 / 5).max(MIN_BEAM); // narrow rather than grow without bound
+        }
 
         if let Some(cb) = on_step.as_deref_mut() {
             let best = backtrack(cipher, &backs, &hyps, 3);
@@ -264,6 +295,50 @@ pub fn solve_words(
     }
     let _ = done;
     backtrack(cipher, &backs, &hyps, opts.results)
+}
+
+/// Steps between releases of unreachable back-pointers.
+const RELEASE_EVERY: usize = 16;
+const MIN_BEAM: usize = 1000;
+
+/// Drop every back-pointer entry that no hypothesis of the newest step descends from, and
+/// renumber the parents that remain. The newest step is untouched, so the caller's hypothesis
+/// indices stay valid. Returns the bytes released.
+fn release_unreachable(backs: &mut [Back]) -> usize {
+    let live = backs.len();
+    if live < 2 {
+        return 0;
+    }
+    // Mark, newest to oldest: which entries of each step are ancestors of a current hypothesis.
+    let mut keep: Vec<Vec<bool>> = backs.iter().map(|b| vec![false; b.parent.len()]).collect();
+    keep[live - 1].fill(true);
+    for j in (1..live).rev() {
+        let (older, newer) = keep.split_at_mut(j);
+        for (i, _) in newer[0].iter().enumerate().filter(|(_, &k)| k) {
+            older[j - 1][backs[j].parent[i] as usize] = true;
+        }
+    }
+    // Compact, oldest to newest, remapping each step's parents into the compacted step before.
+    let before: usize = backs.iter().map(|b| b.parent.len()).sum();
+    let mut remap_prev: Vec<u32> = Vec::new();
+    for j in 0..live {
+        let b = &mut backs[j];
+        let kept = keep[j].iter().filter(|&&k| k).count();
+        let mut parent = Vec::with_capacity(kept);
+        let mut letter = Vec::with_capacity(kept);
+        let mut remap = vec![u32::MAX; b.parent.len()];
+        for i in 0..b.parent.len() {
+            if keep[j][i] {
+                remap[i] = parent.len() as u32;
+                parent.push(if j == 0 { b.parent[i] } else { remap_prev[b.parent[i] as usize] });
+                letter.push(b.letter[i]);
+            }
+        }
+        *b = Back { parent, letter };
+        remap_prev = remap;
+    }
+    let after: usize = backs.iter().map(|b| b.parent.len()).sum();
+    (before - after) * 5
 }
 
 fn backtrack(cipher: &[u8], backs: &[Back], hyps: &[Hyp], count: usize) -> Vec<RkcSolution> {
@@ -337,6 +412,20 @@ mod tests {
         let sols = solve(&lm, &c, &opts, None, None);
         assert_eq!(sols[0].key.len(), c.len(), "every letter must be decoded");
         assert!(pair_accuracy(&sols[0], &k, &p) > 0.99);
+    }
+
+    #[test]
+    fn releasing_unreachable_backpointers_changes_nothing() {
+        use crate::testutil::{model, sample};
+        let lm = model();
+        let p = sample(200_000, 400);
+        let k = sample(300_000, 400);
+        let c: Vec<u8> = p.iter().zip(&k).map(|(&a, &b)| enc(a, b)).collect();
+        let base = RkcOptions { beam: 3000, results: 3, threads: 1, ..Default::default() };
+        let full = solve(lm, &c, &RkcOptions { keep_all_backpointers: true, ..base.clone() }, None, None);
+        let lean = solve(lm, &c, &base, None, None);
+        assert_eq!(full, lean, "releasing unreachable back-pointers must not change any result");
+        assert!(pair_accuracy(&lean[0], &k, &p) > 0.5);
     }
 
     #[test]

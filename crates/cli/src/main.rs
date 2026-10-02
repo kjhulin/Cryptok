@@ -20,7 +20,8 @@ USAGE:
   cryptok serve  [--model FILE] [--sources DIR_OR_FILE,...] [--port 8077] [--host 127.0.0.1] [--no-open]
                  (web UI in your browser. Any --host other than localhost requires CRYPTOK_AUTH=user:password
                   and sets conservative limits; see docs/DEPLOY-AWS.md. Tuning: --allowed-host a.com,b.com
-                  --max-conns --max-jobs --job-timeout SECS --max-letters --max-beam --max-keywords.
+                  --max-conns --max-jobs --job-timeout SECS --max-letters --max-beam --max-keywords
+                  --job-memory-mb MB (traceback memory per running-key search; the beam narrows to fit).
                   --public: keep --host 127.0.0.1 but use the conservative limits, for a reverse proxy
                   on the same machine that does the authentication; requires --allowed-host. See docs/NGINX-SSO.md)
   cryptok train  [--corpus DIR] [--order N] [--out FILE] [--exclude a.txt,b.txt]
@@ -667,6 +668,7 @@ fn cmd_serve(a: &Args) -> Result<(), String> {
     cfg.max_letters = a.num("max-letters", cfg.max_letters)?;
     cfg.max_beam = a.num("max-beam", cfg.max_beam)?;
     cfg.max_keywords = a.num("max-keywords", cfg.max_keywords)?;
+    cfg.job_memory_mb = a.num("job-memory-mb", cfg.job_memory_mb)?;
 
     let state = serve::ServerState::new(lm, quad, sources, a.get("model", "cryptok.cklm"), words, ocr, cfg);
     serve::run(state, !a.has("no-open"))

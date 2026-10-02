@@ -46,6 +46,9 @@ pub struct Config {
     pub max_letters: usize,
     pub max_beam: usize,
     pub max_keywords: usize,
+    /// Traceback memory one running-key search may hold, in MB (0 = unlimited). A search that
+    /// would exceed it narrows its beam instead of growing.
+    pub job_memory_mb: usize,
 }
 
 pub fn is_loopback(host: &str) -> bool {
@@ -69,6 +72,7 @@ impl Config {
             max_letters: if local { 100_000 } else { 2_000 },
             max_beam: if local { 2_000_000 } else { 100_000 },
             max_keywords: if local { 20_000 } else { 500 },
+            job_memory_mb: if local { 0 } else { 192 },
         }
     }
 }
@@ -803,6 +807,7 @@ fn api_rkc(stream: TcpStream, st: &ServerState, req: &Request) -> std::io::Resul
         plain_hints: parse_hint(&req.q("plain"), cipher.len()),
         threads: 0,
         word_weight: st.words.as_ref().map_or(0.0, |w| w.2),
+        max_back_bytes: st.cfg.job_memory_mb << 20,
         ..Default::default()
     };
     let wm = st.words.as_ref().map(|w| &w.0);
