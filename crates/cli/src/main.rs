@@ -50,6 +50,12 @@ USAGE:
                  (period 0 = whole message)
   cryptok hill   [--model FILE] [--results N] TEXT...
                  (2x2 Hill cipher, all keys)
+  cryptok chain  [--model FILE] --steps STEP1,STEP2,... [--beam N] [--max-period N] [--max-cols N]
+                 [--max-width N] [--max-rails N] [--restarts N] [--results N] TEXT...
+                 (several layers, listed outermost first = the order you undo them, e.g.
+                  --steps rail,subst for a rail fence applied over a substitution)
+                 (STEP: affine, subst, vigenere, beaufort, variant-beaufort, porta, gronsfeld,
+                  rail, route, columnar; autokey, hill, playfair, bifid only as the last step)
   cryptok decode --kind KIND TEXT...
                  (KIND: morse, a1z26, baconian, baconian26, polybius, binary, hex)
   cryptok bench gen [--corpus DIR] --holdout a.txt,b.txt [--out FILE] [--seed N] [--per-length N]
@@ -130,6 +136,7 @@ fn main() -> ExitCode {
         "playfair" => parse(&argv[1..]).and_then(|a| cmd_playfair(&a)),
         "bifid" => parse(&argv[1..]).and_then(|a| cmd_bifid(&a)),
         "hill" => parse(&argv[1..]).and_then(|a| cmd_hill(&a)),
+        "chain" => parse(&argv[1..]).and_then(|a| cmd_chain(&a)),
         "decode" => parse(&argv[1..]).and_then(|a| cmd_decode(&a)),
         "bench" => match argv.get(1).map(String::as_str) {
             Some("gen") => parse(&argv[2..]).and_then(|a| cmd_bench_gen(&a)),
@@ -461,6 +468,39 @@ fn cmd_hill(a: &Args) -> Result<(), String> {
         let m = s.matrix;
         println!("[{}] Hill 2x2 key [{} {}; {} {}]  {:.3}/letter", i + 1, m[0], m[1], m[2], m[3], s.score / s.plain.len().max(1) as f32);
         println!("    {}", relayout(&original, &s.plain).replace('\n', "\n    "));
+    }
+    Ok(())
+}
+
+fn cmd_chain(a: &Args) -> Result<(), String> {
+    use cryptok_core::chain::{self, ChainOptions};
+    let (original, cipher) = cipher_input(a)?;
+    let steps: Vec<chain::Step> = a
+        .get("steps", "")
+        .split(',')
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| chain::parse_step(s).ok_or(format!("unknown step '{s}'; steps are: {}", chain::STEP_NAMES)))
+        .collect::<Result<_, _>>()?;
+    let d = ChainOptions::default();
+    let opt = ChainOptions {
+        beam: a.num("beam", d.beam)?,
+        max_period: a.num("max-period", d.max_period)?,
+        restarts: a.num("restarts", d.restarts)?,
+        max_width: a.num("max-width", d.max_width)?,
+        max_cols: a.num("max-cols", d.max_cols)?,
+        max_rails: a.num("max-rails", d.max_rails)?,
+    };
+    chain::plan(&steps)?; // fail before loading the model
+    let lm = load_model(a)?;
+    let t = Instant::now();
+    let res = chain::solve_chain(&lm, &cipher, &steps, &opt)?;
+    eprintln!("solved chain in {:.2}s", t.elapsed().as_secs_f64());
+    for (i, r) in res.iter().take(a.num("results", 3)?).enumerate() {
+        println!("[{}] {:.3}/letter", i + 1, r.per_letter);
+        for (n, p) in r.path.iter().enumerate() {
+            println!("    step {}: {p}", n + 1);
+        }
+        println!("    {}", relayout(&original, &r.plain).replace('\n', "\n    "));
     }
     Ok(())
 }

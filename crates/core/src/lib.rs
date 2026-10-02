@@ -7,6 +7,7 @@
 //! * [`analyze`] — statistical triage; [`decode`] — keyless encodings (Morse, A1Z26, ...).
 
 pub mod analyze;
+pub mod chain;
 pub mod classic;
 pub mod decode;
 pub mod known;

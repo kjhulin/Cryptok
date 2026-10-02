@@ -119,8 +119,17 @@ fn letters_of(chars: &[char]) -> Vec<u8> {
     scrub(&chars.iter().collect::<String>())
 }
 
+/// Scoring function over letters (`0..26`); higher is better.
+pub type Scorer<'a> = &'a (dyn Fn(&[u8]) -> f32 + Sync);
+
 /// Brute-force one and two route steps. Returns the best `top` by full-model score.
 pub fn solve_route(lm: &LangModel, q: &DenseNgram, text: &str, max_width: usize, top: usize) -> Vec<TranspositionSolution> {
+    solve_route_with(&|b| q.score(b), &|b| lm.score_per_letter(b), text, max_width, top)
+}
+
+/// [`solve_route`] with caller-supplied scoring: `fast` ranks every candidate (total
+/// score), `full` re-ranks the leaders (per-letter score).
+pub fn solve_route_with(fast: Scorer, full: Scorer, text: &str, max_width: usize, top: usize) -> Vec<TranspositionSolution> {
     let chars: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
     let n = chars.len();
     if n < 4 {
@@ -135,7 +144,7 @@ pub fn solve_route(lm: &LangModel, q: &DenseNgram, text: &str, max_width: usize,
     let score = |perm: &[u32], buf: &mut Vec<u8>| -> f32 {
         buf.clear();
         buf.extend(perm.iter().filter(|&&i| is_letter[i as usize]).map(|&i| letter[i as usize]));
-        q.score(buf) / buf.len().max(1) as f32
+        fast(buf) / buf.len().max(1) as f32
     };
 
     let threads = std::thread::available_parallelism().map(|x| x.get()).unwrap_or(1);
@@ -183,7 +192,7 @@ pub fn solve_route(lm: &LangModel, q: &DenseNgram, text: &str, max_width: usize,
             continue;
         }
         let l = letters_of(&t);
-        out.push(TranspositionSolution { method: Method::Route(steps), text, per_letter: lm.score_per_letter(&l) });
+        out.push(TranspositionSolution { method: Method::Route(steps), text, per_letter: full(&l) });
     }
     out.sort_by(|a, b| b.per_letter.total_cmp(&a.per_letter));
     out.truncate(top);
@@ -211,6 +220,11 @@ pub fn columnar_decrypt<T: Copy + Default>(c: &[T], order: &[usize]) -> Vec<T> {
 /// Recover a keyed columnar transposition by hill climbing the column order for each
 /// key length in `min_cols..=max_cols`.
 pub fn solve_columnar(lm: &LangModel, q: &DenseNgram, text: &str, min_cols: usize, max_cols: usize, restarts: usize, top: usize) -> Vec<TranspositionSolution> {
+    solve_columnar_with(&|b| q.score(b), &|b| lm.score_per_letter(b), text, min_cols, max_cols, restarts, top)
+}
+
+/// [`solve_columnar`] with caller-supplied scoring (see [`solve_route_with`]).
+pub fn solve_columnar_with(fast: Scorer, full: Scorer, text: &str, min_cols: usize, max_cols: usize, restarts: usize, top: usize) -> Vec<TranspositionSolution> {
     let chars: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
     let n = chars.len();
     let idx: Vec<u32> = (0..n as u32).collect();
@@ -221,7 +235,7 @@ pub fn solve_columnar(lm: &LangModel, q: &DenseNgram, text: &str, min_cols: usiz
         let p = columnar_decrypt(&idx, order);
         buf.clear();
         buf.extend(p.iter().filter(|&&i| is_letter[i as usize]).map(|&i| letter[i as usize]));
-        q.score(&buf)
+        fast(&buf)
     };
     let mut rng = 0x9E37_79B9_7F4A_7C15u64;
     let mut rand = move |m: usize| -> usize {
@@ -284,7 +298,7 @@ pub fn solve_columnar(lm: &LangModel, q: &DenseNgram, text: &str, min_cols: usiz
         let t: Vec<char> = p.iter().map(|&i| chars[i as usize]).collect();
         out.push(TranspositionSolution {
             method: Method::Columnar { order: best.0 },
-            per_letter: lm.score_per_letter(&letters_of(&t)),
+            per_letter: full(&letters_of(&t)),
             text: t.into_iter().collect(),
         });
     }
@@ -326,6 +340,11 @@ pub fn rail_fence_encrypt<T: Copy>(p: &[T], rails: usize, offset: usize) -> Vec<
 
 /// Brute-force every rail count up to `max_rails` and every starting offset.
 pub fn solve_rail_fence(lm: &LangModel, text: &str, max_rails: usize, top: usize) -> Vec<TranspositionSolution> {
+    solve_rail_fence_with(&|b| lm.score_per_letter(b), text, max_rails, top)
+}
+
+/// [`solve_rail_fence`] with a caller-supplied per-letter scorer.
+pub fn solve_rail_fence_with(full: Scorer, text: &str, max_rails: usize, top: usize) -> Vec<TranspositionSolution> {
     let chars: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
     let mut out = Vec::new();
     for rails in 2..=max_rails.min(chars.len().saturating_sub(1)).max(2) {
@@ -333,7 +352,7 @@ pub fn solve_rail_fence(lm: &LangModel, text: &str, max_rails: usize, top: usize
             let t = rail_fence_decrypt(&chars, rails, offset);
             out.push(TranspositionSolution {
                 method: Method::RailFence { rails, offset },
-                per_letter: lm.score_per_letter(&letters_of(&t)),
+                per_letter: full(&letters_of(&t)),
                 text: t.into_iter().collect(),
             });
         }

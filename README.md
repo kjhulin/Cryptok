@@ -39,6 +39,7 @@ Not sure what you have? `cryptok analyze TEXT` prints the index of coincidence, 
 | `rail` | rail fence (all rail counts and offsets); scytale is a one-step route in `transpose` |
 | `playfair`, `bifid` | 5×5 key square recovered by simulated annealing (Bifid over a list of periods) |
 | `hill` | 2×2 Hill cipher, all 157,248 keys |
+| `chain --steps a,b,…` | several layers at once, outermost first (e.g. `rail,subst`, `vigenere,columnar`); see below |
 | `decode --kind …` | Morse, A1Z26, Baconian, Polybius, binary, hex (no key or model needed) |
 
 ```
@@ -46,6 +47,8 @@ cryptok subst "$(cat mono.txt)"
 cryptok periodic --mode beaufort --max-period 12 CIPHER
 cryptok playfair CIPHER
 ```
+
+**Chaining.** `cryptok chain --steps rail,subst CIPHER` undoes layers in the order given (outermost first). An outer layer is solved while the inner ones still scramble the text, so each stage is ranked by something the inner layers leave intact: unigram likelihood for a substitution/periodic layer over transpositions, bigram repetition for a transposition over monoalphabetic substitutions, and the full language model for the last step. Combinations with no such statistic (two transpositions in a row, a Playfair under anything) are rejected with an explanation; `autokey`, `hill`, `playfair` and `bifid` work only as the last step.
 
 ### Command line
 
