@@ -50,6 +50,10 @@ cryptok playfair CIPHER
 
 **Chaining.** `cryptok chain --steps rail,subst CIPHER` undoes layers in the order given (outermost first). An outer layer is solved while the inner ones still scramble the text, so each stage is ranked by something the inner layers leave intact: unigram likelihood for a substitution/periodic layer over transpositions, bigram repetition for a transposition over monoalphabetic substitutions, and the full language model for the last step. Combinations with no such statistic (two transpositions in a row, a Playfair under anything) are rejected with an explanation; `autokey`, `hill`, `playfair` and `bifid` work only as the last step.
 
+### Measuring performance on contest ciphers
+
+`cryptok contest run` runs the analyser and every plausible solver automatically on each cipher in `bench/contests.tsv`, ranks the attempts by description length (plaintext fluency minus the cost of the key), and scores the winner against the known plaintext. `--verbose` lists every attempt, `--exhaustive` ignores the analyser's pruning, `--out FILE` saves a results table (the last baseline is `bench/contest-results.tsv`). The file holds DEF CON 20 and 23, Kryptos K1-K3 and ten synthetic contest-style puzzles (`bench/gen_synthetic.py`); add other contests as new rows. Only ciphertexts with a published solution belong there.
+
 ### Command line
 
 ```

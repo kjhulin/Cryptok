@@ -58,6 +58,10 @@ USAGE:
                   rail, route, columnar; autokey, hill, playfair, bifid only as the last step)
   cryptok decode --kind KIND TEXT...
                  (KIND: morse, a1z26, baconian, baconian26, polybius, binary, hex)
+  cryptok contest run [--model FILE] [--cases bench/contests.tsv] [--only id,id,...] [--exhaustive]
+                 [--rkc-beam N] [--word-weight W] [--pass 0.9] [--out results.tsv] [--verbose]
+                 (run every solver automatically on contest ciphers with known answers and
+                  report which ones fall; see bench/contests.tsv)
   cryptok bench gen [--corpus DIR] --holdout a.txt,b.txt [--out FILE] [--seed N] [--per-length N]
   cryptok bench run [--model FILE] [--cases FILE] [--beam N] [--threads N]
 
@@ -74,7 +78,7 @@ struct Args {
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
-    const SWITCHES: &[&str] = &["quiet", "help", "no-open", "double"];
+    const SWITCHES: &[&str] = &["quiet", "help", "no-open", "double", "exhaustive", "verbose"];
     let mut a = Args { flags: HashMap::new(), switches: vec![], pos: vec![] };
     let mut i = 0;
     while i < args.len() {
@@ -138,6 +142,10 @@ fn main() -> ExitCode {
         "hill" => parse(&argv[1..]).and_then(|a| cmd_hill(&a)),
         "chain" => parse(&argv[1..]).and_then(|a| cmd_chain(&a)),
         "decode" => parse(&argv[1..]).and_then(|a| cmd_decode(&a)),
+        "contest" => match argv.get(1).map(String::as_str) {
+            Some("run") => parse(&argv[2..]).and_then(|a| cmd_contest_run(&a)),
+            _ => Err("usage: cryptok contest run [--cases FILE] ...".into()),
+        },
         "bench" => match argv.get(1).map(String::as_str) {
             Some("gen") => parse(&argv[2..]).and_then(|a| cmd_bench_gen(&a)),
             Some("run") => parse(&argv[2..]).and_then(|a| cmd_bench_run(&a)),
@@ -434,7 +442,7 @@ fn cmd_playfair(a: &Args) -> Result<(), String> {
     let lm = load_model(a)?;
     let q = lm.dense(cryptok_core::classic::climb_ngram_size(&lm, cipher.len()));
     let t = Instant::now();
-    let s = cryptok_core::polygraphic::solve_playfair(&lm, &q, &cipher, a.num("iters", 200_000)?, a.num("restarts", 8)?, 1);
+    let s = cryptok_core::polygraphic::solve_playfair(&lm, &q, &cipher, a.num("iters", 500_000)?, a.num("restarts", 32)?, 1);
     eprintln!("annealed in {:.2}s", t.elapsed().as_secs_f64());
     print_square_solution(&original, &s, "Playfair");
     Ok(())
@@ -501,6 +509,87 @@ fn cmd_chain(a: &Args) -> Result<(), String> {
             println!("    step {}: {p}", n + 1);
         }
         println!("    {}", relayout(&original, &r.plain).replace('\n', "\n    "));
+    }
+    Ok(())
+}
+
+fn cmd_contest_run(a: &Args) -> Result<(), String> {
+    use cryptok_core::auto::{accuracy, auto_solve, AutoOptions};
+    let cases = PathBuf::from(a.get("cases", "bench/contests.tsv"));
+    let raw = std::fs::read_to_string(&cases).map_err(|e| format!("{}: {e}", cases.display()))?;
+    let base = cases.parent().and_then(Path::parent).unwrap_or(Path::new("."));
+    let only: Vec<String> = a.get("only", "").split(',').filter(|s| !s.is_empty()).map(String::from).collect();
+    let pass: f64 = a.get("pass", "0.9").parse().map_err(|_| "--pass expects a number")?;
+    let lm = load_model(a)?;
+    let words = word_setup(a, "")?.map(|w| (std::sync::Arc::new(w.trie), w.weight));
+    let mut rows = Vec::new();
+    let t_all = Instant::now();
+    println!("{:<20} {:<11} {:<10} {:<10} {:>6} {:>7}  {}", "id", "contest", "type", "found", "acc", "secs", "result");
+    for line in raw.lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#')) {
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() < 5 {
+            return Err(format!("bad row (need >= 5 tab-separated fields): {line}"));
+        }
+        let (id, contest, typ, cipher_field, expected) = (f[0], f[1], f[2], f[3], f[4]);
+        if !only.is_empty() && !only.iter().any(|o| o == id) {
+            continue;
+        }
+        let hints = f.get(5).copied().unwrap_or("-");
+        let text = match cipher_field.strip_prefix('@') {
+            Some(p) => std::fs::read_to_string(base.join(p)).map_err(|e| format!("{id}: {p}: {e}"))?,
+            None => cipher_field.to_string(),
+        };
+        let mut opt = AutoOptions { exhaustive: a.has("exhaustive"), rkc_beam: a.num("rkc-beam", 20_000)?, words: words.clone(), ..Default::default() };
+        for h in hints.split(';') {
+            if let Some(v) = h.strip_prefix("alphabet=") {
+                opt.alphabet_keywords = v.split(',').map(String::from).collect();
+            }
+        }
+        let t = Instant::now();
+        let attempts = auto_solve(&lm, &text, &opt);
+        let secs = t.elapsed().as_secs_f64();
+        let exp = scrub(expected);
+        // Judge the winner, but also note if a losing attempt would have been right.
+        let (found, acc) = match attempts.first() {
+            Some(b) => (b.solver.clone(), accuracy(b, &exp)),
+            None => ("-".into(), 0.0),
+        };
+        let oracle = attempts.iter().map(|x| (accuracy(x, &exp), x.solver.clone())).max_by(|x, y| x.0.total_cmp(&y.0));
+        let verdict = if acc >= pass {
+            "SOLVED".to_string()
+        } else if acc >= 0.5 {
+            "partial".to_string()
+        } else {
+            match oracle {
+                Some((o, s)) if o >= pass => format!("missed (ranked below {s})"),
+                _ => "failed".to_string(),
+            }
+        };
+        println!("{id:<20} {contest:<11} {typ:<10} {found:<10} {:>5.0}% {secs:>7.1}  {verdict}", acc * 100.0);
+        if a.has("verbose") {
+            for x in &attempts {
+                println!("    {:<16} adj {:>7.3}  plain {:>7.3}  acc {:>4.0}%  {:>5.1}s  {}", x.solver, x.adjusted(), x.per_letter, accuracy(x, &exp) * 100.0, x.secs, x.detail.chars().take(60).collect::<String>());
+            }
+        }
+        rows.push((id.to_string(), contest.to_string(), typ.to_string(), found, acc, secs, verdict));
+    }
+    println!("\nsummary by contest ({} cases, {:.0}s):", rows.len(), t_all.elapsed().as_secs_f64());
+    let mut contests: Vec<&str> = rows.iter().map(|r| r.1.as_str()).collect();
+    contests.dedup();
+    contests.sort();
+    contests.dedup();
+    for c in contests {
+        let of: Vec<_> = rows.iter().filter(|r| r.1 == c).collect();
+        let solved = of.iter().filter(|r| r.6 == "SOLVED").count();
+        let partial = of.iter().filter(|r| r.6 == "partial").count();
+        println!("  {c:<12} solved {solved}/{}  partial {partial}", of.len());
+    }
+    if let Some(out) = a.flags.get("out") {
+        let mut s = String::from("id\tcontest\ttype\tfound\taccuracy\tsecs\tresult\n");
+        for r in &rows {
+            s += &format!("{}\t{}\t{}\t{}\t{:.3}\t{:.1}\t{}\n", r.0, r.1, r.2, r.3, r.4, r.5, r.6);
+        }
+        std::fs::write(out, s).map_err(|e| e.to_string())?;
     }
     Ok(())
 }

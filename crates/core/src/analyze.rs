@@ -51,9 +51,14 @@ pub fn analyze(text: &str) -> Analysis {
 
     let mut s: Vec<(String, String)> = Vec::new();
     let mut add = |cmd: &str, why: String| s.push((cmd.to_string(), why));
+    // Playfair's signature is independent of IC (short Playfair texts look "English-like").
+    let playfair_like = n % 2 == 0 && !has_j && doubled_digraphs == 0 && distinct <= 25 && n >= 40;
     if n < 20 {
         add("", "too few letters for reliable statistics".into());
     } else if ic > if n < 400 { 0.054 } else { 0.060 } {
+        if playfair_like {
+            add("playfair", format!("even length, no J, no doubled letter in any of {} digraphs: Playfair signature (checked first because short Playfair texts can look English-like)", n / 2));
+        }
         if etaoin > 0.44 {
             add("transpose", format!("IC {ic:.3} and E/T/A/O/I/N make up {:.0}% of the text: letter frequencies look like English, so the letters are probably just rearranged", etaoin * 100.0));
             add("rail", "also try a rail fence if the text is short".into());
@@ -66,7 +71,6 @@ pub fn analyze(text: &str) -> Analysis {
             add("periodic", format!("columns at period {p} look like single-alphabet English (column IC {v:.2} x26): Vigenère/Beaufort/Porta/Quagmire family"));
             add("vigenere", "if you know a keyword for the alphabet, try `cryptok vigenere --alphabet KEYWORD`".into());
         }
-        let playfair_like = n % 2 == 0 && !has_j && doubled_digraphs == 0 && distinct <= 25 && n >= 40;
         if playfair_like {
             add("playfair", format!("even length, no J, no doubled letter in any digraph over {} digraphs: classic Playfair signature", n / 2));
         }

@@ -192,16 +192,22 @@ fn anneal_square(q: &DenseNgram, decrypt: &dyn Fn(&Square, &mut Vec<u8>), iters:
     best
 }
 
-fn best_square(q: &DenseNgram, decrypt: &dyn Fn(&Square, &mut Vec<u8>), iters: usize, restarts: usize, seed: u64) -> (Square, f32) {
-    let mut rng = Rng::new(seed);
-    let mut best: Option<(Square, f32)> = None;
-    for _ in 0..restarts.max(1) {
-        let r = anneal_square(q, decrypt, iters, &mut rng);
-        if best.as_ref().is_none_or(|b| r.1 > b.1) {
-            best = Some(r);
-        }
-    }
-    best.unwrap()
+fn best_square(q: &DenseNgram, decrypt: &(dyn Fn(&Square, &mut Vec<u8>) + Sync), iters: usize, restarts: usize, seed: u64) -> (Square, f32) {
+    // Restarts are independent: run them on all cores.
+    let threads = std::thread::available_parallelism().map(|x| x.get()).unwrap_or(1).min(restarts.max(1));
+    let results: Vec<(Square, f32)> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..threads)
+            .map(|t| {
+                sc.spawn(move || {
+                    let mut rng = Rng::new(seed ^ (t as u64 + 1).wrapping_mul(0x51_7C_C1_B7));
+                    let mine = restarts.max(1) / threads + usize::from(t < restarts.max(1) % threads);
+                    (0..mine).map(|_| anneal_square(q, decrypt, iters, &mut rng)).max_by(|a, b| a.1.total_cmp(&b.1))
+                })
+            })
+            .collect();
+        hs.into_iter().filter_map(|h| h.join().unwrap()).collect()
+    });
+    results.into_iter().max_by(|a, b| a.1.total_cmp(&b.1)).unwrap()
 }
 
 /// Recover a Playfair key square. `cipher` letters are folded J→I.
@@ -228,6 +234,19 @@ pub fn solve_bifid(lm: &LangModel, q: &DenseNgram, cipher: &[u8], periods: &[usi
         })
         .collect();
     out.sort_by(|a, b| b.score.total_cmp(&a.score));
+    // Short messages need far more annealing than a period scan can afford: spend it only
+    // on the period that looks best.
+    if let Some(best) = out.first().cloned() {
+        let period = best.period;
+        let dec = |sq: &Square, o: &mut Vec<u8>| bifid_decrypt(sq, &cipher, period, o);
+        let (square, _) = best_square(q, &dec, iters * 8, restarts * 2, seed ^ 0xB1F1D);
+        let mut plain = Vec::new();
+        bifid_decrypt(&square, &cipher, period, &mut plain);
+        let score = lm.score(&plain);
+        if score > best.score {
+            out[0] = SquareSolution { square, plain, score, period };
+        }
+    }
     out
 }
 
@@ -343,11 +362,11 @@ mod tests {
         let c = playfair_encrypt(&sq, &p);
         let mut truth = Vec::new();
         playfair_decrypt(&sq, &c, &mut truth);
-        let sol = solve_playfair(lm, &q, &c, 200_000, 6, 1);
+        let sol = solve_playfair(lm, &q, &c, 500_000, 24, 1);
         let acc = agreement(&sol.plain, &truth);
         assert!(acc > 0.95, "playfair accuracy {acc}");
         let c = playfair_encrypt(&square_from_keyword("EXAMPLEKYBCDFGHILNOQRSTUVWZ"), &sample(120_000, 400));
-        let sol = solve_playfair(lm, &q, &c, 200_000, 6, 7);
+        let sol = solve_playfair(lm, &q, &c, 500_000, 24, 7);
         let mut truth = Vec::new();
         playfair_decrypt(&square_from_keyword("EXAMPLEKYBCDFGHILNOQRSTUVWZ"), &c, &mut truth);
         let acc = agreement(&sol.plain, &truth);
