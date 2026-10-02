@@ -19,7 +19,7 @@ jobs:
           - { os: windows-latest, name: windows-x86_64, exe: cryptok.exe, target: '' }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -50,7 +50,7 @@ jobs:
     # Pre-trained model so users can skip `cryptok train`.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo run --release -- train --out cryptok.cklm
       - uses: actions/upload-artifact@v5
