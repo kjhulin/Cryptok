@@ -96,6 +96,7 @@ h2 { font-size: 15px; margin: 24px 0 8px; }
 .result { border-top: 1px solid var(--rule); padding: 10px 0 2px; }
 .result header { padding: 0; gap: 12px; align-items: center; margin-bottom: 6px; }
 .result .score { font: 13px var(--mono); color: var(--muted); }
+.result .ref { font-style: italic; }
 .result .letters span { cursor: pointer; user-select: none; }
 .result .letters span.sel { background: var(--sel); }
 .result .letters span.wb { box-shadow: inset 2px 0 0 var(--muted); }
@@ -683,7 +684,8 @@ $('#known-run').addEventListener('click', () => {
           const sp = (str) => [...str.slice(s, e)].map((c) => `<span>${c}</span>`).join('');
           lines += `<div class="line"><div class="idx">${s + 1}</div><div class="rows"><div class="row a">${sp(ka)}</div><div class="row b">${sp(kb)}</div></div></div>`;
         }
-        return `<div class="result" data-k="${k}"><header><strong>${esc(h.source)}</strong>
+        const ref = h.reference ? ` <span class="ref">${esc(h.reference)}</span>` : '';
+        return `<div class="result" data-k="${k}"><header><strong>${esc(h.source)}</strong>${ref}
           <span class="score">from letter ${h.offset}, reads as English in ${(h.coverage * 100).toFixed(0)}% of positions</span>
           <button class="quiet use-known">Pin as hints</button></header>${lines}</div>`;
       }).join('') || '<p class="empty">No source lines up with this cipher.</p>';
