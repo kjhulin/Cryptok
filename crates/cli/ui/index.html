@@ -290,6 +290,8 @@ const state = {
 document.querySelectorAll('nav button').forEach((b) => b.addEventListener('click', () => {
   document.querySelectorAll('nav button').forEach((x) => x.setAttribute('aria-selected', x === b));
   document.querySelectorAll('.panel').forEach((p) => p.classList.toggle('on', p.id === 'p-' + b.dataset.tab));
+  // A hidden panel has no width, so anything rendered into it meanwhile used the fallback line length.
+  if (b.dataset.tab === 'rkc') { renderTape(); renderResults(); }
 }));
 
 // ---------- info
@@ -695,7 +697,6 @@ $('#known-results').addEventListener('click', (e) => {
   if (!e.target.classList.contains('use-known')) return;
   const h = state.known[+e.target.closest('.result').dataset.k];
   for (let i = h.start; i < h.end; i++) state.pinA[i] = h.key.charCodeAt(i - h.start) - 65;
-  renderTape();
   document.querySelector('nav button[data-tab="rkc"]').click();
 });
 
