@@ -22,11 +22,13 @@ cryptok serve          # opens the web UI at http://127.0.0.1:8077/
 
 **Reading ciphertext from a picture.** Under the ciphertext box, *Scan image…* reads an uploaded picture or scan (you can also drop or paste one), *Take photo* opens a phone's camera, and *Use webcam* takes a still from a computer camera. The recognised text lands in the ciphertext box with the picture beside it; check it before solving, because one misread letter shifts every key and crib (I/J, O/Q and U/V are the usual culprits, and clean, well-lit, straight-on shots work far better than angled photos). OCR uses the `tesseract` program when it is installed (`apt install tesseract-ocr`, `brew install tesseract`, or the Windows installer), otherwise the browser falls back to Tesseract.js, which needs internet the first time. Choose *One line* or *Scattered text* if a block layout misreads. From the command line: `cryptok ocr photo.jpg`, e.g. `cryptok analyze $(cryptok ocr photo.jpg)`. To use a phone on your network, start `CRYPTOK_AUTH=user:a-long-password cryptok serve --host 0.0.0.0` (the server refuses to listen beyond localhost without a login); browsers only allow the live webcam on localhost or https, but *Take photo* works over plain http.
 
-The web UI has three tabs:
+The web UI has these tabs:
 
 - **Running key** — solve, pin letters on the worksheet (type in either stream; the other follows), place cribs, drag across a result to pin that stretch, solve again.
 - **Known texts** — slide every source text along the cipher as a candidate key. Add your own sources (lyrics, speeches) with `--sources corpus,path/to/texts`.
 - **Vigenère** — repeating-key Vigenère, optionally over keyword-mixed alphabets.
+- **Transposition** — route transpositions (as in Kryptos K3) and keyed columnar.
+- **Demos** — ready-made ciphertexts that solve in seconds (DEF CON 23, Kryptos K1–K3, running key and Vigenère examples), each loaded into its solver with one click, for showing the tool to others. You can also pin your own ciphertexts there; they are kept in that browser.
 
 ### Other ciphers (command line)
 
