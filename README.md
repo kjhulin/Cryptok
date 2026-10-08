@@ -28,7 +28,7 @@ The web UI has these tabs:
 - **Known texts** — slide every source text along the cipher as a candidate key. Add your own sources (lyrics, speeches) with `--sources corpus,path/to/texts`.
 - **Vigenère** — repeating-key Vigenère, optionally over keyword-mixed alphabets.
 - **Transposition** — route transpositions (as in Kryptos K3) and keyed columnar.
-- **Demos** — ready-made ciphertexts that solve in seconds (DEF CON 23, Kryptos K1–K3, running key and Vigenère examples), each loaded into its solver with one click, for showing the tool to others. You can also pin your own ciphertexts there; they are kept in that browser.
+- **Demos** — ready-made ciphertexts that solve in seconds (DEF CON 23, Kryptos K1–K3, running key and Vigenère examples), each labelled with where it comes from and loaded into its solver with one click, for showing the tool to others. You can also pin your own ciphertexts there, with an optional source; they are kept in that browser.
 
 ### Other ciphers (command line)
 

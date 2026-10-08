@@ -121,7 +121,7 @@ pre.plain { white-space: pre-wrap; word-break: break-all; font: 14px/1.6 var(--m
 .demo h3 { margin: 0; font-size: 15px; }
 .demo .meta { font: 12px var(--mono); color: var(--muted); }
 .demo .note { grid-column: 1; margin: 0; }
-.demo .go { grid-column: 2; grid-row: 1 / span 3; display: flex; gap: 6px; }
+.demo .go { grid-column: 2; grid-row: 1 / span 4; display: flex; gap: 6px; }
 .demo details { grid-column: 1; font-size: 13px; color: var(--muted); }
 .demo details pre.plain { color: var(--ink); }
 @media (max-width: 560px) { .demo { grid-template-columns: 1fr; } .demo .go { grid-column: 1; grid-row: auto; order: 1; } }
@@ -294,6 +294,7 @@ pre.plain { white-space: pre-wrap; word-break: break-all; font: 14px/1.6 var(--m
           <input type="text" id="mine-name" placeholder="Name" spellcheck="false" style="text-transform:none;font-family:var(--sans)">
           <button class="quiet" type="submit">Pin</button>
         </form>
+        <input type="text" id="mine-source" placeholder="Where it comes from (optional)" aria-label="Where the ciphertext comes from" spellcheck="false" style="width:100%;margin-top:6px">
         <p class="note" id="mine-note">Saved in this browser only. Loading it opens the tab you were on when you pinned it.</p>
       </div>
     </aside>
@@ -761,27 +762,27 @@ $('#trans-run').addEventListener('click', () => {
 // Every entry was checked to solve with the server's default settings (order-6 model, beam 20,000).
 // tab: where Load takes you. Answers are shown only when the presenter opens them.
 const DEMOS = [
-  { title: 'DEF CON 23 badge', tab: 'known', kind: 'Running key, real contest cipher',
+  { title: 'DEF CON 23 badge', tab: 'known', source: 'DEF CON 23 (2015) badge challenge; key from Lewis Carroll, Alice in Wonderland', kind: 'Running key, real contest cipher',
     note: 'The key is a line from Alice in Wonderland, which is one of the bundled texts, so a known-text search finds it in about two seconds. Pin it as hints to see it on the tape.',
     cipher: 'BVFBHGHXAWJEKEDMDZAPRMWGNMTVIRPWIKHGIPUU',
     answer: 'FORTUNATE IS THE RED SHIRT ENGINEER WHO LIVE PHR...\nKey: WHO IN THE WORLD AM I AH THATS THE GREAT PUZZLE AND (Alice in Wonderland, chapter 2)' },
-  { title: 'Note to the lighthouse', tab: 'known', kind: 'Running key, key from a bundled book',
+  { title: 'Note to the lighthouse', tab: 'known', source: 'Made for this demo; key from Herman Melville, Moby Dick', kind: 'Running key, key from a bundled book',
     note: 'Keyed with the opening of Moby Dick. Known texts finds it at once; the Running key solver also recovers both texts on its own in about five seconds.',
     cipher: 'OEPEYIILATESWVZUKFXHFMSKOGQDHEUOUWHBZMFVTVKLGJJEDQRETBUGEWIXYWHYRQMDGEGVFECPWYWWTGHYZGVWAKLHVKMAIFAIXUWVGK',
     answer: "MEET ME AT THE OLD LIGHTHOUSE AT MIDNIGHT AND BRING THE BRASS KEY THAT OPENS THE CAPTAINS SEA CHEST TELL NO ONE WHERE YOU ARE GOING\nKey: CALL ME ISHMAEL SOME YEARS AGO..." },
-  { title: 'Two unknown texts', tab: 'rkc', kind: 'Running key, no known key',
+  { title: 'Two unknown texts', tab: 'rkc', source: 'Made for this demo; both texts written for it', kind: 'Running key, no known key',
     note: 'Neither text is in the library, so only the language model can split them (about eight seconds). Both texts come out, but they swap rows in places: pin a stretch and solve again to straighten them.',
     cipher: 'POIRQWIOMMBSEQMSTESCHRIJJVEMYKRWPUYUOPHYXRFNNHSGVHHNGDOIIUMSIUYFXLAVABGUCMOELXJSSDDANNAQUBUKSMYOAHDMNYRRHWNOZFWPTZWFUOEHYRDUILTZBBXDRUXKTAXJVMNFCMHOVARGALWRTZNENQUOODSZWYHGZLWIOFWLTPCBPBUKFQAYQRJXLXGNTQRFYHS',
     answer: 'THE EXPEDITION LEFT THE HARBOR BEFORE DAWN WITH ENOUGH FOOD AND WATER FOR THREE WEEKS...\nKey: WHEN THE LETTER FINALLY ARRIVED IT WAS MUCH SHORTER THAN SHE HAD HOPED...' },
-  { title: 'Lantern', tab: 'vig', kind: 'Vigenère, standard alphabet',
+  { title: 'Lantern', tab: 'vig', source: 'Made for this demo', kind: 'Vigenère, standard alphabet',
     note: 'A seven-letter keyword. Solves in about two seconds.',
     cipher: 'PVRKCJRNRRMQVFDATXLRFLWRTOERDSJAIEGSEFTQVFSOEMOVLHOEWMJHDEQTKRVYAAWEXNTNGAICRETRKWKULTYBRVHAUAWIIRLCUDIPYPTGXVWBCMNLMDCWEFAMWGNICAIINYDPHYEGTNTASNBQTRGIRPSLRMXVELPCXEIFTSRGSLTSTBUVVNVIG',
     answer: 'Key LANTERN. EVERY SECRET MESSAGE HAS A WEAKNESS...' },
-  { title: 'Kryptos K1', tab: 'vig', kind: 'Vigenère, KRYPTOS alphabet', settings: { alphabets: ', KRYPTOS', maxp: 20 },
-    note: 'The first panel of the sculpture at CIA headquarters. About ten seconds.',
+  { title: 'Kryptos K1', source: 'Kryptos, Jim Sanborn\'s sculpture at CIA headquarters (1990)', tab: 'vig', kind: 'Vigenère, KRYPTOS alphabet', settings: { alphabets: ', KRYPTOS', maxp: 20 },
+    note: 'The first panel. About ten seconds.',
     cipher: 'EMUFPHZLRFAXYUSDJKZLDKRNSHGNFIVJ\nYQTQUXQBQVYUVLLTREVJYQTMKYRDMFD',
     answer: 'Key PALIMPSEST. BETWEEN SUBTLE SHADING AND THE ABSENCE OF LIGHT LIES THE NUANCE OF IQLUSION' },
-  { title: 'Kryptos K2', tab: 'vig', kind: 'Vigenère, KRYPTOS alphabet', settings: { alphabets: ', KRYPTOS', maxp: 20 },
+  { title: 'Kryptos K2', source: 'Kryptos, Jim Sanborn\'s sculpture at CIA headquarters (1990)', tab: 'vig', kind: 'Vigenère, KRYPTOS alphabet', settings: { alphabets: ', KRYPTOS', maxp: 20 },
     note: 'The second panel, with its ? marks kept for display. About four seconds.',
     cipher: `VFPJUDEEHZWETZYVGWHKKQETGFQJNCE
 GGWHKK?DQMCPFQZDQMMIAGPFXHQRLG
@@ -796,7 +797,7 @@ ELZZVRRGKFFVOEEXBDMVPNFQXEZLGRE
 DNQFMPNZGLFLPMRJQYALMGNUVPDXVKP
 DQUMEBEDMHDAFMJGZNUPLGEWJLLAETG`,
     answer: 'Key ABSCISSA. IT WAS TOTALLY INVISIBLE HOWS THAT POSSIBLE...' },
-  { title: 'Kryptos K3', tab: 'trans', kind: 'Two route transpositions',
+  { title: 'Kryptos K3', source: 'Kryptos, Jim Sanborn\'s sculpture at CIA headquarters (1990)', tab: 'trans', kind: 'Two route transpositions',
     note: 'The third panel. Found in under a second.',
     cipher: `ENDYAHROHNLSRHEOCPTEOIBIDYSHNAIA
 CHTNREYULDSLLSLLNOHSNOSMRWXMNE
@@ -810,7 +811,7 @@ AECTDDHILCEIHSITEGOEAOSDDRYDLORIT
 RKLMLEHAGTDHARDPNEOHMGFMFEUHE
 ECDMRIPFEIMEHNLSSTTRTVDOHW?`,
     answer: 'SLOWLY DESPARATLY SLOWLY THE REMAINS OF PASSAGE DEBRIS...' },
-  { title: 'Buried treasure', tab: 'trans', kind: 'Keyed columnar transposition',
+  { title: 'Buried treasure', tab: 'trans', source: 'Made for this demo', kind: 'Keyed columnar transposition',
     note: 'Six columns with the keyword GARDEN. Found in under a second.',
     cipher: 'HSBUHDETNGTSOLIHFETRRDTAPEBDUAOTLTNEREIEHKASRINNTHEYDTASDTRRTODAIDEMWUHEIERITSTIGRDTEROTEUUNEOEHEESENLLAIR',
     answer: 'THE TREASURE IS BURIED UNDER THE THIRD OAK TREE PAST THE STONE BRIDGE...' },
@@ -826,6 +827,7 @@ function demoCard(d, i, mine) {
   return `<div class="demo"><h3>${esc(d.title)}</h3>
     <div class="go"><button class="primary" data-load="${i}" data-mine="${mine ? 1 : ''}">Load</button>${mine ? `<button class="quiet" data-unpin="${i}">Unpin</button>` : ''}</div>
     <div class="meta">${d.kind ? esc(d.kind) + ' · ' : ''}${countLetters(d.cipher)} letters · opens ${esc(TAB_NAMES[d.tab] || 'Running key')}</div>
+    ${d.source ? `<div class="meta">Source: ${esc(d.source)}</div>` : ''}
     ${d.note ? `<p class="note">${esc(d.note)}</p>` : ''}
     ${d.answer ? `<details><summary>Answer</summary><pre class="plain">${esc(d.answer)}</pre></details>` : ''}</div>`;
 }
@@ -866,9 +868,10 @@ $('#mine-form').addEventListener('submit', (e) => {
   const last = document.querySelector('nav button[data-last="1"]')?.dataset.tab;
   const name = $('#mine-name').value.trim() || `Pinned ${new Date().toLocaleDateString()}`;
   const mine = loadMine();
-  mine.push({ title: name, tab: TAB_NAMES[last] ? last : 'rkc', cipher, settings: { alphabets: $('#alphabets').value, maxp: +$('#maxp').value } });
+  const source = $('#mine-source').value.trim();
+  mine.push({ title: name, source, tab: TAB_NAMES[last] ? last : 'rkc', cipher, settings: { alphabets: $('#alphabets').value, maxp: +$('#maxp').value } });
   $('#mine-note').textContent = saveMine(mine) ? `Pinned "${name}".` : 'This browser would not save it (private window or storage blocked).';
-  $('#mine-name').value = '';
+  $('#mine-name').value = $('#mine-source').value = '';
   renderDemos();
 });
 // Remember the last solver tab, so a ciphertext pinned from the Demos tab reopens where it was being worked on.
