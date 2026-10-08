@@ -744,9 +744,10 @@ fn cmd_known(a: &Args) -> Result<(), String> {
     println!("searched {} alignments in {:.2}s", letters, t.elapsed().as_secs_f64());
     for (i, h) in hits.iter().enumerate() {
         let pad = |v: &[u8]| format!("{}{}{}", ".".repeat(h.start), unscrub(v), ".".repeat(cipher.len() - h.end));
+        let reference = if h.reference.is_empty() { String::new() } else { format!(" ({})", h.reference) };
         println!(
-            "[{:>2}] {} @ {}  best-window {:.3}/letter  overall {:.3}/letter  English coverage {:.0}%",
-            i + 1, h.source, h.offset, h.window_score, h.score, h.coverage * 100.0
+            "[{:>2}] {}{} @ {}  best-window {:.3}/letter  overall {:.3}/letter  English coverage {:.0}%",
+            i + 1, h.source, reference, h.offset, h.window_score, h.score, h.coverage * 100.0
         );
         println!("     key:   {}", pad(&h.key));
         println!("     other: {}", pad(&h.plain));

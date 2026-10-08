@@ -846,8 +846,9 @@ fn api_known(stream: TcpStream, st: &ServerState, req: &Request) -> std::io::Res
         .iter()
         .map(|h| {
             format!(
-                "{{\"source\":{},\"offset\":{},\"start\":{},\"end\":{},\"key\":{},\"other\":{},\"window\":{},\"score\":{},\"coverage\":{}}}",
+                "{{\"source\":{},\"reference\":{},\"offset\":{},\"start\":{},\"end\":{},\"key\":{},\"other\":{},\"window\":{},\"score\":{},\"coverage\":{}}}",
                 json_str(&h.source),
+                json_str(&h.reference),
                 h.offset,
                 h.start,
                 h.end,

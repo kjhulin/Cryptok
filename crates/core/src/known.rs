@@ -22,6 +22,9 @@ const RING: usize = 64;
 
 pub struct Source {
     pub name: String,
+    /// Human-readable work, author and year (e.g. "Alice's Adventures in Wonderland by
+    /// Lewis Carroll (1865)"), or empty when nothing is known about the file.
+    pub reference: String,
     pub letters: Vec<u8>,
 }
 
@@ -44,7 +47,9 @@ pub fn load_sources(paths: &[PathBuf]) -> std::io::Result<Vec<Source>> {
         let text = String::from_utf8_lossy(&bytes);
         let letters = scrub(strip_gutenberg(&text));
         if !letters.is_empty() {
-            out.push(Source { name: display_name(&f), letters });
+            let name = display_name(&f);
+            let reference = reference_for(&name, &text);
+            out.push(Source { name, reference, letters });
         }
     }
     Ok(out)
@@ -54,10 +59,75 @@ fn display_name(p: &Path) -> String {
     p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
 }
 
+/// Work, author and year of first publication for the bundled corpus, keyed by
+/// file name (Project Gutenberg ebook numbers).
+const CATALOG: &[(&str, &str, &str, &str)] = &[
+    ("10.txt", "The King James Bible", "", "1611"),
+    ("100.txt", "The Complete Works", "William Shakespeare", "1623"),
+    ("1080.txt", "A Modest Proposal", "Jonathan Swift", "1729"),
+    ("11.txt", "Alice's Adventures in Wonderland", "Lewis Carroll", "1865"),
+    ("1112.txt", "Romeo and Juliet", "William Shakespeare", "1597"),
+    ("12.txt", "Through the Looking-Glass", "Lewis Carroll", "1871"),
+    ("120.txt", "Treasure Island", "Robert Louis Stevenson", "1883"),
+    ("1342.txt", "Pride and Prejudice", "Jane Austen", "1813"),
+    ("1400.txt", "Great Expectations", "Charles Dickens", "1861"),
+    ("1497.txt", "The Republic", "Plato", "c. 375 BC"),
+    ("16.txt", "Peter Pan", "J. M. Barrie", "1911"),
+    ("160.txt", "The Awakening and Selected Short Stories", "Kate Chopin", "1899"),
+    ("161.txt", "Sense and Sensibility", "Jane Austen", "1811"),
+    ("1661.txt", "The Adventures of Sherlock Holmes", "Arthur Conan Doyle", "1892"),
+    ("1952.txt", "The Yellow Wallpaper", "Charlotte Perkins Gilman", "1892"),
+    ("20.txt", "Paradise Lost", "John Milton", "1667"),
+    ("2147-0.txt", "The Works of Edgar Allan Poe, Volume 1", "Edgar Allan Poe", "1903"),
+    ("2148.txt", "The Works of Edgar Allan Poe, Volume 2", "Edgar Allan Poe", "1903"),
+    ("215.txt", "The Call of the Wild", "Jack London", "1903"),
+    ("219.txt", "Heart of Darkness", "Joseph Conrad", "1899"),
+    ("236.txt", "The Jungle Book", "Rudyard Kipling", "1894"),
+    ("244.txt", "A Study in Scarlet", "Arthur Conan Doyle", "1887"),
+    ("2591.txt", "Grimms' Fairy Tales", "The Brothers Grimm", "1812"),
+    ("2600.txt", "War and Peace", "Leo Tolstoy", "1869"),
+    ("2701.txt", "Moby-Dick", "Herman Melville", "1851"),
+    ("3207.txt", "Leviathan", "Thomas Hobbes", "1651"),
+    ("345.txt", "Dracula", "Bram Stoker", "1897"),
+    ("34901.txt", "On Liberty", "John Stuart Mill", "1859"),
+    ("35.txt", "The Time Machine", "H. G. Wells", "1895"),
+    ("36.txt", "The War of the Worlds", "H. G. Wells", "1898"),
+    ("42.txt", "Strange Case of Dr Jekyll and Mr Hyde", "Robert Louis Stevenson", "1886"),
+    ("4300.txt", "Ulysses", "James Joyce", "1922"),
+    ("5200.txt", "Metamorphosis", "Franz Kafka", "1915"),
+    ("526.txt", "Heart of Darkness", "Joseph Conrad", "1899"),
+    ("55.txt", "The Wonderful Wizard of Oz", "L. Frank Baum", "1900"),
+    ("74.txt", "The Adventures of Tom Sawyer", "Mark Twain", "1876"),
+    ("76.txt", "Adventures of Huckleberry Finn", "Mark Twain", "1884"),
+    ("84.txt", "Frankenstein", "Mary Shelley", "1818"),
+    ("844.txt", "The Importance of Being Earnest", "Oscar Wilde", "1895"),
+    ("98.txt", "A Tale of Two Cities", "Charles Dickens", "1859"),
+];
+
+/// Familiar reference for a source file: the catalog entry when the file is a
+/// bundled corpus text, otherwise the title and author from its Gutenberg header.
+pub fn reference_for(name: &str, text: &str) -> String {
+    if let Some(&(_, title, author, year)) = CATALOG.iter().find(|e| e.0 == name) {
+        return match author {
+            "" => format!("{title} ({year})"),
+            a => format!("{title} by {a} ({year})"),
+        };
+    }
+    let head = &text[..text.find("*** START OF").or_else(|| text.find("***START OF")).unwrap_or(0)];
+    let field = |key: &str| head.lines().find_map(|l| l.trim().strip_prefix(key)).map(str::trim).filter(|v| !v.is_empty());
+    match (field("Title:"), field("Author:")) {
+        (Some(t), Some(a)) => format!("{t} by {a}"),
+        (Some(t), None) => t.to_string(),
+        _ => String::new(),
+    }
+}
+
 /// One candidate alignment of a source text against the ciphertext.
 #[derive(Clone, Debug)]
 pub struct KnownHit {
     pub source: String,
+    /// Work, author and year of the source (see [`Source::reference`]).
+    pub reference: String,
     /// Letter offset in the source aligned with cipher position 0 (may be negative).
     pub offset: i64,
     /// Cipher positions covered by the source (`start..end`).
@@ -282,6 +352,7 @@ fn rescore(lm: &LangModel, cipher: &[u8], src: &Source, a: i64, w: usize) -> Kno
     let coverage = good.iter().filter(|&&g| g).count() as f32 / len.max(1) as f32;
     KnownHit {
         source: src.name.clone(),
+        reference: src.reference.clone(),
         offset: a,
         start,
         end,
@@ -304,7 +375,7 @@ mod tests {
                     we hold these truths to be self evident that all men are created equal and endowed with rights ";
         let (lm, _) = LangModel::train(&[scrub(&book.repeat(30))], 4);
         let quad = lm.dense(4);
-        let src = Source { name: "book".into(), letters: scrub(book) };
+        let src = Source { name: "book".into(), reference: String::new(), letters: scrub(book) };
         let key = &src.letters[40..80];
         let plain = scrub("wehold these truths to be self evident th");
         let c: Vec<u8> = plain.iter().zip(key).map(|(&p, &k)| enc(p, k)).collect();
@@ -312,5 +383,14 @@ mod tests {
         // The plaintext also occurs in the book, so the mirrored alignment scores equally.
         let hit = hits.iter().take(2).find(|h| h.offset == 40).expect("key alignment not in top 2");
         assert_eq!(hit.plain, plain[..c.len()].to_vec());
+    }
+
+    #[test]
+    fn references() {
+        assert_eq!(reference_for("11.txt", ""), "Alice's Adventures in Wonderland by Lewis Carroll (1865)");
+        assert_eq!(reference_for("10.txt", ""), "The King James Bible (1611)");
+        let other = "Title: Some Book\nAuthor: A. Writer\n\n*** START OF THIS EBOOK ***\nTitle: not this\n";
+        assert_eq!(reference_for("999.txt", other), "Some Book by A. Writer");
+        assert_eq!(reference_for("notes.txt", "just letters"), "");
     }
 }
