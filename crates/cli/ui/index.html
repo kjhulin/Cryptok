@@ -115,6 +115,16 @@ aside .group { background: var(--sheet); border: 1px solid var(--rule); border-r
 
 pre.plain { white-space: pre-wrap; word-break: break-all; font: 14px/1.6 var(--mono); background: var(--sheet); border: 1px solid var(--rule); border-radius: 4px; padding: 10px 12px; margin: 6px 0 0; }
 .err { color: var(--b); }
+
+/* Demos: ready-made ciphertexts to load with one click. */
+.demo { border-top: 1px solid var(--rule); padding: 12px 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 16px; align-items: start; }
+.demo h3 { margin: 0; font-size: 15px; }
+.demo .meta { font: 12px var(--mono); color: var(--muted); }
+.demo .note { grid-column: 1; margin: 0; }
+.demo .go { grid-column: 2; grid-row: 1 / span 4; display: flex; gap: 6px; }
+.demo details { grid-column: 1; font-size: 13px; color: var(--muted); }
+.demo details pre.plain { color: var(--ink); }
+@media (max-width: 560px) { .demo { grid-template-columns: 1fr; } .demo .go { grid-column: 1; grid-row: auto; order: 1; } }
 @media (prefers-reduced-motion: reduce) { .progress i { transition: none; } }
 </style>
 </head>
@@ -126,6 +136,7 @@ pre.plain { white-space: pre-wrap; word-break: break-all; font: 14px/1.6 var(--m
     <button role="tab" aria-selected="false" data-tab="known">Known texts</button>
     <button role="tab" aria-selected="false" data-tab="vig">Vigenère</button>
     <button role="tab" aria-selected="false" data-tab="trans">Transposition</button>
+    <button role="tab" aria-selected="false" data-tab="demos">Demos</button>
   </nav>
   <div id="status">Loading model…</div>
 </header>
@@ -266,6 +277,27 @@ pre.plain { white-space: pre-wrap; word-break: break-all; font: 14px/1.6 var(--m
       <div id="trans-results"><p class="empty">Tries route transpositions (one or two steps, every width and direction, as in Kryptos K3) and keyed columnar transpositions up to 12 columns.</p></div>
     </div>
     <aside></aside>
+  </section>
+
+  <!-- Demos -->
+  <section class="panel" id="p-demos" role="tabpanel">
+    <div>
+      <p class="note">Ciphertexts that solve in a few seconds, for showing the tool to someone. Load one, then press the solver's button on the tab it opens.</p>
+      <div id="demo-list"></div>
+      <h2>Your pinned ciphertexts</h2>
+      <div id="mine-list"></div>
+    </div>
+    <aside>
+      <div class="group">
+        <h3><label for="mine-name">Pin the current ciphertext</label></h3>
+        <form class="crib-form" id="mine-form">
+          <input type="text" id="mine-name" placeholder="Name" spellcheck="false" style="text-transform:none;font-family:var(--sans)">
+          <button class="quiet" type="submit">Pin</button>
+        </form>
+        <input type="text" id="mine-source" placeholder="Where it comes from (optional)" aria-label="Where the ciphertext comes from" spellcheck="false" style="width:100%;margin-top:6px">
+        <p class="note" id="mine-note">Saved in this browser only. Loading it opens the tab you were on when you pinned it.</p>
+      </div>
+    </aside>
   </section>
 </main>
 
@@ -725,6 +757,130 @@ $('#trans-run').addEventListener('click', () => {
       <pre class="plain">${esc(r.text)}</pre></div>`).join('') || '<p class="empty">Need at least 8 letters.</p>';
   }).finally(() => { btn.disabled = false; });
 });
+
+// ---------- demos
+// Every entry was checked to solve with the server's default settings (order-6 model, beam 20,000).
+// tab: where Load takes you. Answers are shown only when the presenter opens them.
+const DEMOS = [
+  { title: 'DEF CON 23 badge', tab: 'known', source: 'DEF CON 23 (2015) badge challenge; key from Lewis Carroll, Alice in Wonderland', kind: 'Running key, real contest cipher',
+    note: 'The key is a line from Alice in Wonderland, which is one of the bundled texts, so a known-text search finds it in about two seconds. Pin it as hints to see it on the tape.',
+    cipher: 'BVFBHGHXAWJEKEDMDZAPRMWGNMTVIRPWIKHGIPUU',
+    answer: 'FORTUNATE IS THE RED SHIRT ENGINEER WHO LIVE PHR...\nKey: WHO IN THE WORLD AM I AH THATS THE GREAT PUZZLE AND (Alice in Wonderland, chapter 2)' },
+  { title: 'Note to the lighthouse', tab: 'known', source: 'Made for this demo; key from Herman Melville, Moby Dick', kind: 'Running key, key from a bundled book',
+    note: 'Keyed with the opening of Moby Dick. Known texts finds it at once; the Running key solver also recovers both texts on its own in about five seconds.',
+    cipher: 'OEPEYIILATESWVZUKFXHFMSKOGQDHEUOUWHBZMFVTVKLGJJEDQRETBUGEWIXYWHYRQMDGEGVFECPWYWWTGHYZGVWAKLHVKMAIFAIXUWVGK',
+    answer: "MEET ME AT THE OLD LIGHTHOUSE AT MIDNIGHT AND BRING THE BRASS KEY THAT OPENS THE CAPTAINS SEA CHEST TELL NO ONE WHERE YOU ARE GOING\nKey: CALL ME ISHMAEL SOME YEARS AGO..." },
+  { title: 'Two unknown texts', tab: 'rkc', source: 'Made for this demo; both texts written for it', kind: 'Running key, no known key',
+    note: 'Neither text is in the library, so only the language model can split them (about eight seconds). Both texts come out, but they swap rows in places: pin a stretch and solve again to straighten them.',
+    cipher: 'POIRQWIOMMBSEQMSTESCHRIJJVEMYKRWPUYUOPHYXRFNNHSGVHHNGDOIIUMSIUYFXLAVABGUCMOELXJSSDDANNAQUBUKSMYOAHDMNYRRHWNOZFWPTZWFUOEHYRDUILTZBBXDRUXKTAXJVMNFCMHOVARGALWRTZNENQUOODSZWYHGZLWIOFWLTPCBPBUKFQAYQRJXLXGNTQRFYHS',
+    answer: 'THE EXPEDITION LEFT THE HARBOR BEFORE DAWN WITH ENOUGH FOOD AND WATER FOR THREE WEEKS...\nKey: WHEN THE LETTER FINALLY ARRIVED IT WAS MUCH SHORTER THAN SHE HAD HOPED...' },
+  { title: 'Lantern', tab: 'vig', source: 'Made for this demo', kind: 'Vigenère, standard alphabet',
+    note: 'A seven-letter keyword. Solves in about two seconds.',
+    cipher: 'PVRKCJRNRRMQVFDATXLRFLWRTOERDSJAIEGSEFTQVFSOEMOVLHOEWMJHDEQTKRVYAAWEXNTNGAICRETRKWKULTYBRVHAUAWIIRLCUDIPYPTGXVWBCMNLMDCWEFAMWGNICAIINYDPHYEGTNTASNBQTRGIRPSLRMXVELPCXEIFTSRGSLTSTBUVVNVIG',
+    answer: 'Key LANTERN. EVERY SECRET MESSAGE HAS A WEAKNESS...' },
+  { title: 'Kryptos K1', source: 'Kryptos, Jim Sanborn\'s sculpture at CIA headquarters (1990)', tab: 'vig', kind: 'Vigenère, KRYPTOS alphabet', settings: { alphabets: ', KRYPTOS', maxp: 20 },
+    note: 'The first panel. About ten seconds.',
+    cipher: 'EMUFPHZLRFAXYUSDJKZLDKRNSHGNFIVJ\nYQTQUXQBQVYUVLLTREVJYQTMKYRDMFD',
+    answer: 'Key PALIMPSEST. BETWEEN SUBTLE SHADING AND THE ABSENCE OF LIGHT LIES THE NUANCE OF IQLUSION' },
+  { title: 'Kryptos K2', source: 'Kryptos, Jim Sanborn\'s sculpture at CIA headquarters (1990)', tab: 'vig', kind: 'Vigenère, KRYPTOS alphabet', settings: { alphabets: ', KRYPTOS', maxp: 20 },
+    note: 'The second panel, with its ? marks kept for display. About four seconds.',
+    cipher: `VFPJUDEEHZWETZYVGWHKKQETGFQJNCE
+GGWHKK?DQMCPFQZDQMMIAGPFXHQRLG
+TIMVMZJANQLVKQEDAGDVFRPJUNGEUNA
+QZGZLECGYUXUEENJTBJLBQCRTBJDFHRR
+YIZETKZEMVDUFKSJHKFWHKUWQLSZFTI
+HHDDDUVH?DWKBFUFPWNTDFIYCUQZERE
+EVLDKFEZMOQQJLTTUGSYQPFEUNLAVIDX
+FLGGTEZ?FKZBSFDQVGOGIPUFXHHDRKF
+FHQNTGPUAECNUVPDJMQCLQUMUNEDFQ
+ELZZVRRGKFFVOEEXBDMVPNFQXEZLGRE
+DNQFMPNZGLFLPMRJQYALMGNUVPDXVKP
+DQUMEBEDMHDAFMJGZNUPLGEWJLLAETG`,
+    answer: 'Key ABSCISSA. IT WAS TOTALLY INVISIBLE HOWS THAT POSSIBLE...' },
+  { title: 'Kryptos K3', source: 'Kryptos, Jim Sanborn\'s sculpture at CIA headquarters (1990)', tab: 'trans', kind: 'Two route transpositions',
+    note: 'The third panel. Found in under a second.',
+    cipher: `ENDYAHROHNLSRHEOCPTEOIBIDYSHNAIA
+CHTNREYULDSLLSLLNOHSNOSMRWXMNE
+TPRNGATIHNRARPESLNNELEBLPIIACAE
+WMTWNDITEENRAHCTENEUDRETNHAEOE
+TFOLSEDTIWENHAEIOYTEYQHEENCTAYCR
+EIFTBRSPAMHHEWENATAMATEGYEERLB
+TEEFOASFIOTUETUAEOTOARMAEERTNRTI
+BSEDDNIAAHTTMSTEWPIEROAGRIEWFEB
+AECTDDHILCEIHSITEGOEAOSDDRYDLORIT
+RKLMLEHAGTDHARDPNEOHMGFMFEUHE
+ECDMRIPFEIMEHNLSSTTRTVDOHW?`,
+    answer: 'SLOWLY DESPARATLY SLOWLY THE REMAINS OF PASSAGE DEBRIS...' },
+  { title: 'Buried treasure', tab: 'trans', source: 'Made for this demo', kind: 'Keyed columnar transposition',
+    note: 'Six columns with the keyword GARDEN. Found in under a second.',
+    cipher: 'HSBUHDETNGTSOLIHFETRRDTAPEBDUAOTLTNEREIEHKASRINNTHEYDTASDTRRTODAIDEMWUHEIERITSTIGRDTEROTEUUNEOEHEESENLLAIR',
+    answer: 'THE TREASURE IS BURIED UNDER THE THIRD OAK TREE PAST THE STONE BRIDGE...' },
+];
+
+const TAB_NAMES = { rkc: 'Running key', known: 'Known texts', vig: 'Vigenère', trans: 'Transposition' };
+const MINE_KEY = 'cryptok.pinned';
+const loadMine = () => { try { return JSON.parse(localStorage.getItem(MINE_KEY)) || []; } catch { return []; } };
+const saveMine = (list) => { try { localStorage.setItem(MINE_KEY, JSON.stringify(list)); return true; } catch { return false; } };
+const countLetters = (t) => (t.toUpperCase().match(/[A-Z]/g) || []).length;
+
+function demoCard(d, i, mine) {
+  return `<div class="demo"><h3>${esc(d.title)}</h3>
+    <div class="go"><button class="primary" data-load="${i}" data-mine="${mine ? 1 : ''}">Load</button>${mine ? `<button class="quiet" data-unpin="${i}">Unpin</button>` : ''}</div>
+    <div class="meta">${d.kind ? esc(d.kind) + ' · ' : ''}${countLetters(d.cipher)} letters · opens ${esc(TAB_NAMES[d.tab] || 'Running key')}</div>
+    ${d.source ? `<div class="meta">Source: ${esc(d.source)}</div>` : ''}
+    ${d.note ? `<p class="note">${esc(d.note)}</p>` : ''}
+    ${d.answer ? `<details><summary>Answer</summary><pre class="plain">${esc(d.answer)}</pre></details>` : ''}</div>`;
+}
+function renderDemos() {
+  $('#demo-list').innerHTML = DEMOS.map((d, i) => demoCard(d, i, false)).join('');
+  const mine = loadMine();
+  $('#mine-list').innerHTML = mine.map((d, i) => demoCard(d, i, true)).join('') || '<p class="empty">None yet. Paste a ciphertext above and pin it from the side panel.</p>';
+}
+
+function loadDemo(d) {
+  if (state.running) $('#solve').click();
+  $('#cipher').value = d.cipher;
+  state.pinA = [];   // pins belong to the previous cipher
+  readCipher();
+  if (d.settings?.alphabets != null) $('#alphabets').value = d.settings.alphabets;
+  if (d.settings?.maxp != null) $('#maxp').value = d.settings.maxp;
+  for (const id of ['#rkc-results', '#known-results', '#vig-results', '#trans-results']) $(id).innerHTML = '';
+  for (const id of ['#rkc-time', '#known-time', '#vig-time', '#trans-time']) $(id).textContent = '';
+  $('#rkc-prog').style.width = $('#known-prog').style.width = '0';
+  renderResults();
+  document.querySelector(`nav button[data-tab="${TAB_NAMES[d.tab] ? d.tab : 'rkc'}"]`).click();
+  $('#cipher').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+document.querySelector('#p-demos').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.load != null) {
+    const d = b.dataset.mine ? loadMine()[+b.dataset.load] : DEMOS[+b.dataset.load];
+    if (d) loadDemo(d);
+  } else if (b.dataset.unpin != null) {
+    const mine = loadMine(); mine.splice(+b.dataset.unpin, 1); saveMine(mine); renderDemos();
+  }
+});
+$('#mine-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const cipher = $('#cipher').value.trim();
+  if (!countLetters(cipher)) { $('#mine-note').textContent = 'Paste a ciphertext first.'; return; }
+  const last = document.querySelector('nav button[data-last="1"]')?.dataset.tab;
+  const name = $('#mine-name').value.trim() || `Pinned ${new Date().toLocaleDateString()}`;
+  const mine = loadMine();
+  const source = $('#mine-source').value.trim();
+  mine.push({ title: name, source, tab: TAB_NAMES[last] ? last : 'rkc', cipher, settings: { alphabets: $('#alphabets').value, maxp: +$('#maxp').value } });
+  $('#mine-note').textContent = saveMine(mine) ? `Pinned "${name}".` : 'This browser would not save it (private window or storage blocked).';
+  $('#mine-name').value = $('#mine-source').value = '';
+  renderDemos();
+});
+// Remember the last solver tab, so a ciphertext pinned from the Demos tab reopens where it was being worked on.
+document.querySelectorAll('nav button').forEach((b) => b.addEventListener('click', () => {
+  if (b.dataset.tab === 'demos') return;
+  document.querySelectorAll('nav button').forEach((x) => { x.dataset.last = x === b ? '1' : ''; });
+}));
+document.querySelector('nav button[data-tab="rkc"]').dataset.last = '1';
+renderDemos();
 
 let rt; window.addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(() => { renderTape(); renderResults(); }, 150); });
 renderTape();
