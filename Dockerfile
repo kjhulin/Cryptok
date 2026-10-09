@@ -1,7 +1,7 @@
 # Production image for `cryptok serve` (see docs/DEPLOY-AWS.md).
 #   docker build -t cryptok .
-#   docker run --rm -p 8077:8077 -e CRYPTOK_AUTH='user:a-long-random-password' \
-#       --read-only --tmpfs /tmp --cap-drop ALL --memory 2g cryptok --allowed-host cryptok.example.com
+#   docker run --rm -p 8077:8077 --read-only \
+#       --tmpfs /tmp --cap-drop ALL --memory 2g cryptok --allowed-host cryptok.example.com
 FROM rust:1-slim-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
@@ -26,6 +26,4 @@ COPY corpus corpus
 COPY data data
 USER 10001:10001
 EXPOSE 8077
-# Authentication is mandatory off-localhost: pass CRYPTOK_AUTH=user:password at run time
-# (from AWS Secrets Manager / SSM Parameter Store, never baked into the image).
 ENTRYPOINT ["/app/cryptok", "serve", "--host", "0.0.0.0", "--port", "8077", "--no-open", "--model", "/app/cryptok.cklm", "--sources", "/app/corpus"]

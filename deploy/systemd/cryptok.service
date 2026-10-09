@@ -7,9 +7,6 @@ After=network.target
 User=cryptok
 Group=cryptok
 WorkingDirectory=/opt/cryptok
-# CRYPTOK_AUTH=nginx:<long random secret>, mode 0600, root-owned. Must match the Authorization
-# header in /etc/nginx/snippets/cryptok-proxy.inc.
-EnvironmentFile=/etc/cryptok/auth.env
 ExecStart=/opt/cryptok/cryptok serve --host 127.0.0.1 --port 8077 --no-open \
           --public --allowed-host cryptok.space \
           --model /opt/cryptok/cryptok.cklm --sources /opt/cryptok/corpus
