@@ -173,7 +173,9 @@ pre.plain { white-space: pre-wrap; word-break: break-all; font: 14px/1.6 var(--m
       <div id="scan-result" hidden>
         <img id="scan-img" alt="The image that was read">
         <p class="note" id="scan-note"></p>
+        <button class="quiet" id="scan-clear" title="Discard the picture from this page">Remove picture</button>
       </div>
+      <p class="count" id="scan-privacy"></p>
     </div>
   </div>
 
@@ -355,10 +357,25 @@ $('#cipher').addEventListener('input', readCipher);
 const scan = {
   tesseractLoading: null,
   stream: null,
+  previewUrl: null,
   setStatus(t) { $('#scan-status').textContent = t; },
   info: { ocr: false },
 };
-fetch('api/info').then((r) => r.json()).then((i) => { scan.info = i; }).catch(() => {});
+fetch('api/info').then((r) => r.json()).then((i) => {
+  scan.info = i;
+  $('#scan-privacy').textContent = i.ocr
+    ? 'Pictures are sent to this server only to be read, held in memory, and never saved.'
+    : 'Pictures are read inside your browser and are not uploaded.';
+}).catch(() => {});
+
+// The picture is kept only as a short-lived in-memory preview: drop it when replaced, removed, or the page closes.
+function dropPreview() {
+  if (scan.previewUrl) URL.revokeObjectURL(scan.previewUrl);
+  scan.previewUrl = null;
+  $('#scan-img').removeAttribute('src');
+}
+$('#scan-clear').addEventListener('click', () => { dropPreview(); $('#scan-result').hidden = true; $('#scan-note').textContent = ''; });
+addEventListener('pagehide', dropPreview);
 
 // Same rules as the server: upper-case letters, keep ? and line breaks, drop other noise.
 function cleanOcr(raw, digits) {
@@ -448,7 +465,9 @@ async function scanImage(source) {
   try {
     scan.setStatus('Reading image…');
     const cv = await imageToCanvas(source);
-    $('#scan-img').src = URL.createObjectURL(await canvasBlob(cv, 'image/jpeg', 0.7));
+    dropPreview();
+    scan.previewUrl = URL.createObjectURL(await canvasBlob(cv, 'image/jpeg', 0.7));
+    $('#scan-img').src = scan.previewUrl;
     $('#scan-result').hidden = false;
     $('#scan-note').textContent = '';
     const r = scan.info.ocr ? await ocrOnServer(cv, psm, digits) : await ocrInBrowser(cv, psm, digits);

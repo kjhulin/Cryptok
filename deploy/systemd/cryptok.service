@@ -10,15 +10,20 @@ WorkingDirectory=/opt/cryptok
 # CRYPTOK_AUTH=nginx:<long random secret>, mode 0600, root-owned. Must match the Authorization
 # header in /etc/nginx/snippets/cryptok-proxy.inc.
 EnvironmentFile=/etc/cryptok/auth.env
+# Return freed search buffers to the OS (see docs/NGINX-SSO.md, Memory).
+Environment=MALLOC_ARENA_MAX=2 MALLOC_MMAP_THRESHOLD_=131072 MALLOC_TRIM_THRESHOLD_=131072
 ExecStart=/opt/cryptok/cryptok serve --host 127.0.0.1 --port 8077 --no-open \
-          --public --allowed-host cryptok.space \
+          --public --lean --allowed-host cryptok.space \
           --model /opt/cryptok/cryptok.cklm --sources /opt/cryptok/corpus
 Restart=on-failure
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-MemoryMax=2G
+MemoryMax=512M
+# Uploaded photos live only in memory: keep them out of core dumps and swap.
+LimitCORE=0
+MemorySwapMax=0
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_INET AF_INET6
 SystemCallFilter=@system-service

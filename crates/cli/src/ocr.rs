@@ -6,9 +6,8 @@
 
 use cryptok_core::ocr::{clean, image_extension, Cleaned};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 pub fn tesseract_available() -> bool {
@@ -66,10 +65,17 @@ const OCR_TIMEOUT: Duration = Duration::from_secs(40);
 /// Output we are willing to buffer from Tesseract.
 const OCR_MAX_OUTPUT: u64 = 1 << 20;
 const MAX_SIDE: u32 = 12_000;
-const MAX_PIXELS: u64 = 50_000_000;
+const MAX_PIXELS: u64 = 16_000_000;
 
-/// Run Tesseract on an image file and clean the result into cipher text.
-pub fn ocr_file(path: &Path, opt: &OcrOptions) -> Result<OcrResult, OcrError> {
+/// Where Tesseract reads the image from.
+enum Source<'a> {
+    /// A file the caller owns (the `cryptok ocr` command).
+    File(&'a Path),
+    /// Bytes piped to Tesseract's standard input. Nothing is written to disk.
+    Memory(&'a [u8]),
+}
+
+fn run_tesseract(source: Source, opt: &OcrOptions) -> Result<OcrResult, OcrError> {
     let mut whitelist = String::from("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz?");
     if opt.allow_digits {
         whitelist.push_str("0123456789");
@@ -77,55 +83,72 @@ pub fn ocr_file(path: &Path, opt: &OcrOptions) -> Result<OcrResult, OcrError> {
     if !opt.lang.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '+') {
         return Err(OcrError::public("invalid language"));
     }
-    let mut child = Command::new("tesseract")
-        .arg(path)
-        .arg("stdout")
+    let mut cmd = Command::new("tesseract");
+    match &source {
+        Source::File(p) => cmd.arg(p),
+        Source::Memory(_) => cmd.arg("stdin"),
+    };
+    cmd.arg("stdout")
         .args(["--psm", &opt.psm.to_string(), "-l", &opt.lang])
         .args(["-c", &format!("tessedit_char_whitelist={whitelist}")])
         .env("OMP_THREAD_LIMIT", "1")
-        .stdin(Stdio::null())
+        .stdin(if matches!(source, Source::Memory(_)) { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                OcrError::public("tesseract is not installed (apt install tesseract-ocr / brew install tesseract)")
-            } else {
-                OcrError::internal("could not start the OCR engine", e.to_string())
-            }
-        })?;
-    // Drain both pipes on helper threads (capped) so a chatty or hung child cannot block us.
-    let (mut out, mut err) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
-    let t_out = std::thread::spawn(move || {
-        let mut b = Vec::new();
-        let _ = (&mut out).take(OCR_MAX_OUTPUT).read_to_end(&mut b);
-        b
-    });
-    let t_err = std::thread::spawn(move || {
-        let mut b = Vec::new();
-        let _ = (&mut err).take(64 * 1024).read_to_end(&mut b);
-        b
-    });
-    let deadline = Instant::now() + OCR_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break s,
-            Ok(None) if Instant::now() > deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(OcrError::public("the image took too long to read; try a smaller or simpler picture"));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
-            Err(e) => return Err(OcrError::internal("OCR failed", e.to_string())),
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            OcrError::public("tesseract is not installed (apt install tesseract-ocr / brew install tesseract)")
+        } else {
+            OcrError::internal("could not start the OCR engine", e.to_string())
         }
-    };
-    let (stdout, stderr) = (t_out.join().unwrap_or_default(), t_err.join().unwrap_or_default());
+    })?;
+    let (mut out, mut err) = (child.stdout.take().unwrap(), child.stderr.take().unwrap());
+    let stdin = child.stdin.take();
+    // Feed the image and drain both pipes on helper threads (capped), so a chatty, hung or
+    // slow-reading child can never block us. Scoped threads borrow the image: no copy is made.
+    let (status, stdout, stderr) = std::thread::scope(|sc| {
+        if let (Some(mut pipe), Source::Memory(bytes)) = (stdin, &source) {
+            sc.spawn(move || {
+                let _ = pipe.write_all(bytes); // a broken pipe just means Tesseract stopped early
+            });
+        }
+        let t_out = sc.spawn(move || {
+            let mut b = Vec::new();
+            let _ = (&mut out).take(OCR_MAX_OUTPUT).read_to_end(&mut b);
+            b
+        });
+        let t_err = sc.spawn(move || {
+            let mut b = Vec::new();
+            let _ = (&mut err).take(64 * 1024).read_to_end(&mut b);
+            b
+        });
+        let deadline = Instant::now() + OCR_TIMEOUT;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(s)) => break Ok(s),
+                Ok(None) if Instant::now() > deadline => {
+                    let _ = child.kill(); // closes its pipes, which ends the helper threads
+                    let _ = child.wait();
+                    break Err(OcrError::public("the image took too long to read; try a smaller or simpler picture"));
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+                Err(e) => break Err(OcrError::internal("OCR failed", e.to_string())),
+            }
+        };
+        (status, t_out.join().unwrap_or_default(), t_err.join().unwrap_or_default())
+    });
+    let status = status?;
     if !status.success() {
         return Err(OcrError::internal("the image could not be read", String::from_utf8_lossy(&stderr).trim().to_string()));
     }
     let raw = String::from_utf8_lossy(&stdout).to_string();
     let cleaned = clean(&raw, opt.allow_digits);
     Ok(OcrResult { raw, cleaned })
+}
+
+/// Run Tesseract on an image file and clean the result into cipher text.
+pub fn ocr_file(path: &Path, opt: &OcrOptions) -> Result<OcrResult, OcrError> {
+    run_tesseract(Source::File(path), opt)
 }
 
 /// Pixel dimensions from an image header, without decoding it.
@@ -177,42 +200,26 @@ pub fn image_dimensions(b: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
-/// OCR image bytes uploaded by a browser. The bytes go to a private file named by us (never
-/// by the sender) in `dir`, and the image must be a PNG, JPEG, GIF, BMP or WebP whose header
-/// declares a sane size, so a small file cannot expand into gigabytes of pixels.
-pub fn ocr_bytes(bytes: &[u8], opt: &OcrOptions, dir: &Path) -> Result<OcrResult, OcrError> {
-    static N: AtomicUsize = AtomicUsize::new(0);
-    let ext = match image_extension(bytes) {
-        Some(e @ ("png" | "jpg" | "gif" | "bmp" | "webp")) => e,
+/// OCR image bytes uploaded by a browser. **The image is never written to disk**: it goes to
+/// Tesseract's standard input and exists only in memory. It must be a PNG, JPEG, GIF, BMP or
+/// WebP whose header declares a sane size, so a small file cannot expand into gigabytes of pixels.
+pub fn ocr_bytes(bytes: &[u8], opt: &OcrOptions) -> Result<OcrResult, OcrError> {
+    match image_extension(bytes) {
+        Some("png" | "jpg" | "gif" | "bmp" | "webp") => {}
         _ => return Err(OcrError::public("unsupported image type (use PNG, JPEG, GIF, BMP or WebP)")),
-    };
+    }
     let (w, h) = image_dimensions(bytes).ok_or(OcrError::public("the image header is damaged or unsupported"))?;
     if w == 0 || h == 0 || w > MAX_SIDE || h > MAX_SIDE || (w as u64) * (h as u64) > MAX_PIXELS {
-        return Err(OcrError::public("the image is too large (limit 12000 pixels a side, 50 megapixels)"));
+        return Err(OcrError::public("the image is too large (limit 12000 pixels a side, 16 megapixels)"));
     }
-    let path: PathBuf = dir.join(format!("ocr-{}-{}.{ext}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
-    write_private(&path, bytes).map_err(|e| OcrError::internal("could not store the upload", format!("{}: {e}", path.display())))?;
-    let r = ocr_file(&path, opt);
-    let _ = std::fs::remove_file(&path);
-    r
+    run_tesseract(Source::Memory(bytes), opt)
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut o = std::fs::OpenOptions::new();
-    o.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
-    o.open(path)?.write_all(bytes)
-}
-
-/// A fresh directory only this user can read, for uploads.
-pub fn private_temp_dir() -> std::io::Result<PathBuf> {
-    let p = std::env::temp_dir().join(format!("cryptok-{}-{:x}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)));
-    let mut b = std::fs::DirBuilder::new();
-    #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
-    b.create(&p)?;
-    Ok(p)
+/// Overwrite a buffer that held an upload before it is freed (best effort: keeps the picture
+/// out of memory that is reused, swapped, or dumped later).
+pub fn wipe(buf: &mut [u8]) {
+    buf.fill(0);
+    std::hint::black_box(&buf);
 }
 
 #[cfg(test)]
@@ -235,13 +242,12 @@ mod tests {
 
     #[test]
     fn rejects_decompression_bombs_and_junk() {
-        let dir = std::env::temp_dir();
         let opt = OcrOptions::default();
         let mut png = vec![0x89, b'P', b'N', b'G', 13, 10, 26, 10, 0, 0, 0, 13, b'I', b'H', b'D', b'R'];
         png.extend(60_000u32.to_be_bytes());
         png.extend(60_000u32.to_be_bytes());
-        assert!(ocr_bytes(&png, &opt, &dir).unwrap_err().public.contains("too large"));
-        assert!(ocr_bytes(b"%PDF-1.7", &opt, &dir).unwrap_err().public.contains("unsupported"));
-        assert!(ocr_bytes(&[0x89, b'P', b'N', b'G'], &opt, &dir).unwrap_err().public.contains("header"));
+        assert!(ocr_bytes(&png, &opt).unwrap_err().public.contains("too large"));
+        assert!(ocr_bytes(b"%PDF-1.7", &opt).unwrap_err().public.contains("unsupported"));
+        assert!(ocr_bytes(&[0x89, b'P', b'N', b'G'], &opt).unwrap_err().public.contains("header"));
     }
 }

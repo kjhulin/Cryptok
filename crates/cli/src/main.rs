@@ -20,10 +20,14 @@ USAGE:
   cryptok serve  [--model FILE] [--sources DIR_OR_FILE,...] [--port 8077] [--host 127.0.0.1] [--no-open]
                  (web UI in your browser. Any --host other than localhost requires CRYPTOK_AUTH=user:password
                   and sets conservative limits; see docs/DEPLOY-AWS.md. Tuning: --allowed-host a.com,b.com
-                  --max-conns --max-jobs --job-timeout SECS --max-letters --max-beam --max-keywords.
+                  --max-conns --max-jobs --job-timeout SECS --max-letters --max-beam --max-keywords
+                  --job-memory-mb MB (traceback memory per running-key search; the beam narrows to fit).
+                  --lean: for a ~512 MB machine: one search at a time, beam <= 50,000, cipher <= 1,500 letters,
+                  known texts reloaded per search instead of held in memory.
                   --public: keep --host 127.0.0.1 but use the conservative limits, for a reverse proxy
                   on the same machine that does the authentication; requires --allowed-host. See docs/NGINX-SSO.md)
-  cryptok train  [--corpus DIR[,DIR...]] [--order N] [--out FILE] [--exclude a.txt,b.txt]
+  cryptok train  [--corpus DIR[,DIR...]] [--order N] [--prune N] [--out FILE] [--exclude a.txt,b.txt]
+                 (--prune N drops order-N n-grams seen fewer than N times: a smaller, lighter model)
   cryptok eval   [--model FILE] [--corpus DIR[,DIR...]] --files a.txt,b.txt
                  (held-out cross-entropy in bits per letter; lower is better)
   cryptok score  [--model FILE] TEXT...
@@ -87,7 +91,7 @@ struct Args {
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
-    const SWITCHES: &[&str] = &["quiet", "help", "no-open", "double", "exhaustive", "verbose", "digits", "raw", "insecure-no-auth", "public", "unigram", "trigram"];
+    const SWITCHES: &[&str] = &["quiet", "help", "no-open", "double", "exhaustive", "verbose", "digits", "raw", "insecure-no-auth", "public", "unigram", "trigram", "lean"];
     let mut a = Args { flags: HashMap::new(), switches: vec![], pos: vec![] };
     let mut i = 0;
     while i < args.len() {
@@ -202,7 +206,7 @@ fn cmd_train(a: &Args) -> Result<(), String> {
     let out = PathBuf::from(a.get("out", "cryptok.cklm"));
     let exclude: Vec<String> = a.get("exclude", "").split(',').filter(|s| !s.is_empty()).map(String::from).collect();
     let t = Instant::now();
-    let (lm, st) = LangModel::train_dir(&corpus, order, &exclude).map_err(|e| e.to_string())?;
+    let (lm, st) = LangModel::train_dir_pruned(&corpus, order, &exclude, a.num("prune", 1)? as u32).map_err(|e| e.to_string())?;
     let words_path = out.with_extension("words");
     let wm = WordModel::from_corpus(&corpus, &exclude, 3, a.has("trigram")).map_err(|e| e.to_string())?;
     wm.save(&words_path).map_err(|e| format!("{}: {e}", words_path.display()))?;
@@ -649,7 +653,8 @@ fn cmd_serve(a: &Args) -> Result<(), String> {
     let default_sources = if Path::new("bench/private").is_dir() { "corpus,bench/private" } else { "corpus" };
     let paths: Vec<PathBuf> = a.get("sources", default_sources).split(',').filter(|s| !s.is_empty()).map(PathBuf::from).collect();
     let sources = cryptok_core::known::load_sources(&paths).map_err(|e| e.to_string())?;
-    eprintln!("loaded {} known-text sources", sources.len());
+    eprintln!("loaded {} known-text sources{}", sources.len(), if a.has("lean") { " (reloaded per search to save memory)" } else { "" });
+    let sources = serve::SourceStore::new(sources, paths, a.has("lean"));
     let quad = lm.dense(4.min(lm.order() + 1));
     let host = a.get("host", "127.0.0.1");
     let port = a.num("port", 8077)? as u16;
@@ -659,6 +664,9 @@ fn cmd_serve(a: &Args) -> Result<(), String> {
 
     let public = a.has("public");
     let mut cfg = serve::Config::for_host(&host, port, public);
+    if a.has("lean") {
+        cfg = cfg.lean();
+    }
     // Credentials: --auth user:password, or better the CRYPTOK_AUTH environment variable
     // (command lines are visible to other users in `ps`).
     let auth = a.flags.get("auth").cloned().or_else(|| std::env::var("CRYPTOK_AUTH").ok().filter(|s| !s.is_empty()));
@@ -687,7 +695,7 @@ fn cmd_serve(a: &Args) -> Result<(), String> {
     cfg.max_letters = a.num("max-letters", cfg.max_letters)?;
     cfg.max_beam = a.num("max-beam", cfg.max_beam)?;
     cfg.max_keywords = a.num("max-keywords", cfg.max_keywords)?;
-    cfg.tmp_dir = ocr::private_temp_dir().map_err(|e| format!("cannot create a private upload directory: {e}"))?;
+    cfg.job_memory_mb = a.num("job-memory-mb", cfg.job_memory_mb)?;
 
     let state = serve::ServerState::new(lm, quad, sources, a.get("model", "cryptok.cklm"), words, ocr, cfg);
     serve::run(state, !a.has("no-open"))
