@@ -18,7 +18,7 @@ Internet ──HTTPS 443──> ALB (ACM certificate, WAF) ──HTTP 8077──
   IP) and the AWS managed *Common Rule Set*. The server has global limits but no per-client
   rate limiting, because behind a load balancer every client shares the ALB's address.
 * **Target group health check:** `GET /healthz` on port 8077, expecting `200` (it needs no
-  credentials and reveals nothing).
+  `Host` header and reveals nothing).
 * **Compute:** ECS Fargate (0.5 vCPU / 1 GB is the smallest size with 512 MB+ headroom; 1 vCPU
   searches faster) or a small EC2 instance. The image starts with `--lean`, sized for **512 MB**:
   about 180 MB idle, and a stress battery (a 1,500-letter running-key search, known-text search,
@@ -31,21 +31,7 @@ Internet ──HTTPS 443──> ALB (ACM certificate, WAF) ──HTTP 8077──
   train, a 23 MB model, about 2.6 points less accurate on the held-out benchmark), or train the model
   elsewhere and pass `--build-arg MODEL_FILE=cryptok.cklm`.
 * **Logs:** send stdout/stderr to CloudWatch Logs. The server logs one line per request
-  (client address, method, path; never the query string, which holds the ciphertext) and every
-  authentication failure.
-
-## Credentials
-
-The server refuses to listen on a non-loopback address without credentials. Store
-`user:password` (at least 12 characters, ideally 24+ random) in **AWS Secrets Manager** or SSM
-Parameter Store and inject it as the `CRYPTOK_AUTH` environment variable (ECS `secrets:`
-field). Do not put it in the image, the task definition's plain `environment`, or a command
-line (visible in `ps`). Rotate by updating the secret and restarting the task.
-
-HTTP Basic is simple and stops drive-by use, but it is one shared login. For per-user access
-put the ALB's built-in **OIDC/Cognito authentication** action in front and then start the
-server with `--insecure-no-auth` (only safe when the security group guarantees that nothing
-but the ALB can reach the port).
+  (client address, method, path; never the query string, which holds the ciphertext).
 
 ## Docker / ECS
 
@@ -58,7 +44,6 @@ Task definition essentials:
 
 * `command`/entrypoint args: `--allowed-host cryptok.example.com` (the public host name; the
   ALB passes it through, and anything else gets `421`).
-* `secrets`: `CRYPTOK_AUTH` from Secrets Manager.
 * `readonlyRootFilesystem: true`. The app writes no files (uploaded photos are piped to Tesseract
   in memory and never stored), so no writable volume is needed. Run as the image's non-root user,
   drop all Linux capabilities, `memory: 1024` (512 works with `--lean`), `cpu: 512` or more.
@@ -69,7 +54,6 @@ Task definition essentials:
 ```
 [Service]
 User=cryptok
-EnvironmentFile=/etc/cryptok/auth.env        # CRYPTOK_AUTH=user:password, mode 0600, root-owned
 ExecStart=/opt/cryptok/cryptok serve --host 0.0.0.0 --port 8077 --no-open \
           --model /opt/cryptok/cryptok.cklm --sources /opt/cryptok/corpus --allowed-host cryptok.example.com
 Restart=on-failure
@@ -104,12 +88,11 @@ Anything non-loopback uses these defaults; override with the flags shown in `cry
 ## Checklist before going live
 
 - [ ] ALB serves HTTPS only; port 8077 reachable only from the ALB.
-- [ ] `CRYPTOK_AUTH` comes from Secrets Manager and is long and random.
 - [ ] `--allowed-host` is set to the real host name.
 - [ ] `tesseract-ocr` installed (the Dockerfile does this).
 - [ ] `bench/private` is **not** in the image or on the host: its copyrighted key texts would be
       readable through the known-text search.
-- [ ] WAF rate rule attached; CloudWatch alarms on 5xx and on authentication failures.
+- [ ] WAF rate rule attached; CloudWatch alarms on 5xx.
 - [ ] Photos are not retained: ALB/WAF/CDN logging must not capture request bodies (ALB access logs record the URL but not the body).
 - [ ] Ciphertext is sent in URLs (`GET /api/rkc?cipher=...`), so ALB access logs, if enabled,
       would record it. Leave ALB access logging off or restrict who can read that bucket.

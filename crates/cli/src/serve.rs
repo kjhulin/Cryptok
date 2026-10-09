@@ -6,7 +6,7 @@
 //! cancels the search.
 //!
 //! The server is meant to sit behind a TLS-terminating reverse proxy when exposed to a
-//! network (see docs/DEPLOY-AWS.md). Hardening in this file: HTTP Basic authentication,
+//! network (see docs/DEPLOY-AWS.md). Hardening in this file:
 //! Host-header allow-list (DNS-rebinding protection), request-size and time limits, caps on
 //! connections and concurrent solver jobs, per-request input limits, a wall-clock job
 //! deadline, a content-security policy with a per-response nonce, and security headers.
@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 const INDEX_HTML: &str = include_str!("../ui/index.html");
 
-/// Limits and access control. [`Config::for_host`] picks defaults: generous on loopback,
+/// Limits. [`Config::for_host`] picks defaults: generous on loopback,
 /// conservative when the server is reachable from a network.
 #[derive(Clone)]
 pub struct Config {
@@ -34,8 +34,6 @@ pub struct Config {
     pub public: bool,
     pub host: String,
     pub port: u16,
-    /// `(user, password)` for HTTP Basic authentication.
-    pub auth: Option<(String, String)>,
     /// Accepted `Host` header values (lower case, no port). Empty = accept any.
     pub allowed_hosts: Vec<String>,
     pub max_conns: usize,
@@ -76,7 +74,6 @@ impl Config {
             public: !local,
             host: host.to_string(),
             port,
-            auth: None,
             allowed_hosts: if local { vec!["localhost".into(), "127.0.0.1".into(), "[::1]".into(), "::1".into()] } else { vec![] },
             max_conns: if local { 256 } else { 64 },
             max_jobs: if local { 8 } else { 2 },
@@ -185,8 +182,7 @@ pub fn run(state: ServerState, open: bool) -> Result<(), String> {
     if !local {
         eprintln!(
             "note: public mode on {host}. This server speaks plain HTTP: put a TLS-terminating proxy (nginx, an AWS load balancer) in front of it. \
-             Authentication here: {}. Host allow-list: {}.",
-            if state.cfg.auth.is_some() { "HTTP Basic (enabled)" } else { "none (the proxy must authenticate)" },
+             Host allow-list: {}.",
             if state.cfg.allowed_hosts.is_empty() { "any".to_string() } else { state.cfg.allowed_hosts.join(", ") }
         );
     }
@@ -242,10 +238,7 @@ struct Request {
     /// preflight, which this server never grants, so it guards the POST endpoint.
     custom_header: bool,
     host: String,
-    authorization: String,
     forwarded_for: String,
-    /// `X-Auth-Request-Email` set by a trusted SSO proxy; used only for the request log.
-    user: String,
     body: Vec<u8>,
 }
 
@@ -278,7 +271,7 @@ fn read_request(stream: &TcpStream) -> Result<Option<Request>, Refusal> {
     let mut r = BufReader::new(stream);
     let Some(line) = read_line_limited(&mut r, MAX_REQUEST_LINE, ("414 URI Too Long", "request line too long"))? else { return Ok(None) };
     let (mut content_length, mut custom_header) = (None::<usize>, false);
-    let (mut host, mut authorization, mut forwarded_for, mut user) = (String::new(), String::new(), String::new(), String::new());
+    let (mut host, mut forwarded_for) = (String::new(), String::new());
     for count in 0.. {
         let Some(h) = read_line_limited(&mut r, MAX_HEADER_LINE, ("431 Request Header Fields Too Large", "header too long"))? else { break };
         if h == "\r\n" || h == "\n" {
@@ -301,9 +294,7 @@ fn read_request(stream: &TcpStream) -> Result<Option<Request>, Refusal> {
             "transfer-encoding" => return Err(("501 Not Implemented", "Transfer-Encoding is not supported")),
             "x-cryptok" => custom_header = true,
             "host" => host = v.to_string(),
-            "authorization" => authorization = v.to_string(),
             "x-forwarded-for" => forwarded_for = v.to_string(),
-            "x-auth-request-email" => user = v.to_string(),
             _ => {}
         }
     }
@@ -347,7 +338,7 @@ fn read_request(stream: &TcpStream) -> Result<Option<Request>, Refusal> {
         }
         _ => return Err(("405 Method Not Allowed", "GET only")),
     }
-    Ok(Some(Request { method, path: path.to_string(), query, custom_header, host, authorization, forwarded_for, user, body }))
+    Ok(Some(Request { method, path: path.to_string(), query, custom_header, host, forwarded_for, body }))
 }
 
 fn url_decode(s: &str) -> String {
@@ -443,46 +434,7 @@ fn respond_index(s: &TcpStream, st: &ServerState) -> std::io::Result<()> {
     respond_with(s, "200 OK", "text/html; charset=utf-8", &[&policy], &html)
 }
 
-// ------------------------------------------------------------------ authentication
-
-fn base64_decode(s: &str) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(s.len() * 3 / 4);
-    let (mut acc, mut bits) = (0u32, 0);
-    for c in s.bytes().filter(|&c| c != b'=') {
-        let v = match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            _ => return None,
-        } as u32;
-        acc = (acc << 6) | v;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-            acc &= (1 << bits) - 1;
-        }
-    }
-    Some(out)
-}
-
-/// Compare without leaking where the first difference is.
-fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    let mut diff = (a.len() ^ b.len()) as u8;
-    for i in 0..a.len().max(b.len()) {
-        diff |= a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0);
-    }
-    diff == 0
-}
-
-fn authorised(cfg: &Config, req: &Request) -> bool {
-    let Some((user, pass)) = &cfg.auth else { return true };
-    let Some(b64) = req.authorization.strip_prefix("Basic ").or_else(|| req.authorization.strip_prefix("basic ")) else { return false };
-    let Some(cred) = base64_decode(b64.trim()) else { return false };
-    ct_eq(&cred, format!("{user}:{pass}").as_bytes())
-}
+// ------------------------------------------------------------------ access checks
 
 fn host_allowed(cfg: &Config, req: &Request) -> bool {
     if cfg.allowed_hosts.is_empty() {
@@ -650,23 +602,16 @@ fn handle(stream: TcpStream, st: &ServerState) -> std::io::Result<()> {
 }
 
 fn route(stream: TcpStream, st: &ServerState, req: &Request) -> std::io::Result<()> {
-    // Load-balancer health check: no Host or credentials, reveals nothing.
+    // Load-balancer health check: no Host header needed, reveals nothing.
     if req.path == "/healthz" {
         return respond(&stream, "200 OK", "text/plain", "ok");
     }
     if !host_allowed(&st.cfg, &req) {
         return respond(&stream, "421 Misdirected Request", "text/plain", "unrecognised Host header");
     }
-    if !authorised(&st.cfg, &req) {
-        eprintln!("auth failure from {}", client_ip(&stream, &req));
-        std::thread::sleep(Duration::from_millis(300)); // slow down guessing
-        return respond_with(&stream, "401 Unauthorized", "text/plain", &["WWW-Authenticate: Basic realm=\"cryptok\", charset=\"UTF-8\""], "authentication required");
-    }
     if st.cfg.public {
-        // Request log. The query string is left out: it carries the ciphertext. `user` is the
-        // identity a trusted proxy's SSO layer vouches for (X-Auth-Request-Email), if any.
-        let user = if req.user.is_empty() { String::new() } else { format!(" user={}", req.user.chars().filter(|c| c.is_ascii_graphic()).take(80).collect::<String>()) };
-        eprintln!("{} {} {}{user}", client_ip(&stream, &req), req.method, req.path);
+        // Request log. The query string is left out: it carries the ciphertext.
+        eprintln!("{} {} {}", client_ip(&stream, &req), req.method, req.path);
     }
     if req.method == "POST" && req.path != "/api/ocr" {
         return respond(&stream, "405 Method Not Allowed", "text/plain", "POST is only used for /api/ocr");
@@ -935,48 +880,25 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
 
-    fn req(host: &str, auth: &str) -> Request {
-        Request { method: "GET".into(), path: "/".into(), query: vec![], custom_header: false, host: host.into(), authorization: auth.into(), forwarded_for: String::new(), user: String::new(), body: vec![] }
-    }
-
-    #[test]
-    fn base64_and_constant_time_compare() {
-        assert_eq!(base64_decode("YWxpY2U6c2VjcmV0").unwrap(), b"alice:secret");
-        assert_eq!(base64_decode("YWI=").unwrap(), b"ab");
-        assert!(base64_decode("not base64!").is_none());
-        assert!(ct_eq(b"abc", b"abc"));
-        assert!(!ct_eq(b"abc", b"abd"));
-        assert!(!ct_eq(b"abc", b"abcd"));
-        assert!(!ct_eq(b"", b"x"));
-    }
-
-    #[test]
-    fn basic_auth() {
-        let mut cfg = Config::for_host("0.0.0.0", 1, false);
-        assert!(authorised(&cfg, &req("h", ""))); // auth disabled
-        cfg.auth = Some(("alice".into(), "secret-password".into()));
-        let good = format!("Basic {}", "YWxpY2U6c2VjcmV0LXBhc3N3b3Jk");
-        assert!(authorised(&cfg, &req("h", &good)));
-        assert!(!authorised(&cfg, &req("h", "")));
-        assert!(!authorised(&cfg, &req("h", "Basic YWxpY2U6d3Jvbmc=")));
-        assert!(!authorised(&cfg, &req("h", "Bearer YWxpY2U6c2VjcmV0LXBhc3N3b3Jk")));
+    fn req(host: &str) -> Request {
+        Request { method: "GET".into(), path: "/".into(), query: vec![], custom_header: false, host: host.into(), forwarded_for: String::new(), body: vec![] }
     }
 
     #[test]
     fn host_allow_list() {
         let local = Config::for_host("127.0.0.1", 1, false);
         for ok in ["localhost", "localhost:8077", "127.0.0.1:8077", "[::1]:8077", "LOCALHOST"] {
-            assert!(host_allowed(&local, &req(ok, "")), "{ok}");
+            assert!(host_allowed(&local, &req(ok)), "{ok}");
         }
         // DNS rebinding: attacker's name resolving to 127.0.0.1.
         for bad in ["evil.example", "evil.example:8077", "127.0.0.1.evil.example", ""] {
-            assert!(!host_allowed(&local, &req(bad, "")), "{bad}");
+            assert!(!host_allowed(&local, &req(bad)), "{bad}");
         }
         let mut public = Config::for_host("0.0.0.0", 1, false);
-        assert!(host_allowed(&public, &req("anything", ""))); // not configured: any
+        assert!(host_allowed(&public, &req("anything"))); // not configured: any
         public.allowed_hosts = vec!["demo.example.com".into()];
-        assert!(host_allowed(&public, &req("demo.example.com:443", "")));
-        assert!(!host_allowed(&public, &req("other.example.com", "")));
+        assert!(host_allowed(&public, &req("demo.example.com:443")));
+        assert!(!host_allowed(&public, &req("other.example.com")));
     }
 
     #[test]

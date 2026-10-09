@@ -1,7 +1,7 @@
 # Production image for `cryptok serve` (see docs/DEPLOY-AWS.md).
 #   docker build -t cryptok .
-#   docker run --rm -p 8077:8077 -e CRYPTOK_AUTH='user:a-long-random-password' \
-#       --read-only --cap-drop ALL --memory 512m cryptok --allowed-host cryptok.example.com
+#   docker run --rm -p 8077:8077 --read-only \
+#       --tmpfs /tmp --cap-drop ALL --memory 512m cryptok --allowed-host cryptok.example.com
 #
 # Memory. Running: the default (--lean) uses about 180 MB idle and peaked at 300 MB in a stress
 # battery, so 512 MB is comfortable. Building: training the language model needs about 420 MB
@@ -45,6 +45,4 @@ ENV MALLOC_ARENA_MAX=2 \
     MALLOC_MMAP_THRESHOLD_=131072 \
     MALLOC_TRIM_THRESHOLD_=131072
 EXPOSE 8077
-# Authentication is mandatory off-localhost: pass CRYPTOK_AUTH=user:password at run time
-# (from AWS Secrets Manager / SSM Parameter Store, never baked into the image).
 ENTRYPOINT ["/app/cryptok", "serve", "--host", "0.0.0.0", "--port", "8077", "--no-open", "--lean", "--model", "/app/cryptok.cklm", "--sources", "/app/corpus"]

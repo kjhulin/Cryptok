@@ -7,13 +7,11 @@ After=network.target
 User=cryptok
 Group=cryptok
 WorkingDirectory=/opt/cryptok
-# CRYPTOK_AUTH=nginx:<long random secret>, mode 0600, root-owned. Must match the Authorization
-# header in /etc/nginx/snippets/cryptok-proxy.inc.
-EnvironmentFile=/etc/cryptok/auth.env
-# Return freed search buffers to the OS (see docs/NGINX-SSO.md, Memory).
+# Return freed search buffers to the OS (see docs/NGINX.md).
 Environment=MALLOC_ARENA_MAX=2 MALLOC_MMAP_THRESHOLD_=131072 MALLOC_TRIM_THRESHOLD_=131072
+# Replace example.com with your host name.
 ExecStart=/opt/cryptok/cryptok serve --host 127.0.0.1 --port 8077 --no-open \
-          --public --lean --allowed-host cryptok.space \
+          --public --lean --allowed-host example.com \
           --model /opt/cryptok/cryptok.cklm --sources /opt/cryptok/corpus
 Restart=on-failure
 NoNewPrivileges=true
