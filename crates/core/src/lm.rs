@@ -20,6 +20,26 @@ pub const STEP: f32 = 0.1;
 const MAGIC: &[u8; 4] = b"CKLM";
 const VERSION: u32 = 1;
 pub const MAX_ORDER: usize = 12;
+/// Shortest context length that entropy pruning may remove.
+const PRUNE_MIN_LEVEL: usize = 3;
+/// Levels (context lengths) below this use plain counts rather than Kneser–Ney continuation counts.
+const RAW_LEVELS: usize = 4;
+
+/// Model pruning options for training.
+#[derive(Debug, Clone, Copy)]
+pub struct Prune {
+    /// Drop highest-order n-grams seen fewer than this many times (1 = keep all).
+    pub min_count: u32,
+    /// Entropy pruning threshold (0 = off): a context of length >= 3 is dropped when
+    /// count x KL(its row || the row it backs off to) is below this, in nats.
+    pub entropy: f64,
+}
+
+impl Default for Prune {
+    fn default() -> Self {
+        Prune { min_count: 1, entropy: 0.0 }
+    }
+}
 
 struct Level {
     map: U64Map,
@@ -115,11 +135,11 @@ impl LangModel {
     /// Train from a directory of text files (Gutenberg boilerplate is stripped).
     /// Files whose names appear in `exclude` are skipped.
     pub fn train_dir(dirs: &[PathBuf], order: usize, exclude: &[String]) -> io::Result<(Self, TrainStats)> {
-        Self::train_dir_pruned(dirs, order, exclude, 1)
+        Self::train_dir_pruned(dirs, order, exclude, Prune::default())
     }
 
-    /// [`train_dir`](Self::train_dir) with pruning of rare highest-order n-grams.
-    pub fn train_dir_pruned(dirs: &[PathBuf], order: usize, exclude: &[String], prune_below: u32) -> io::Result<(Self, TrainStats)> {
+    /// [`train_dir`](Self::train_dir) with pruning (see [`Prune`]).
+    pub fn train_dir_pruned(dirs: &[PathBuf], order: usize, exclude: &[String], prune: Prune) -> io::Result<(Self, TrainStats)> {
         let names = crate::text::corpus_files(dirs, exclude)?;
         let mut texts = Vec::with_capacity(names.len());
         for p in names {
@@ -128,19 +148,18 @@ impl LangModel {
             let s = String::from_utf8_lossy(&buf);
             texts.push(scrub(strip_gutenberg(&s)));
         }
-        Ok(Self::train_pruned(&texts, order, prune_below))
+        Ok(Self::train_pruned(&texts, order, prune))
     }
 
     /// Train from pre-scrubbed letter sequences.
     pub fn train(texts: &[Vec<u8>], order: usize) -> (Self, TrainStats) {
-        Self::train_pruned(texts, order, 1)
+        Self::train_pruned(texts, order, Prune::default())
     }
 
-    /// Like [`train`](Self::train), but drops highest-order n-grams seen fewer than
-    /// `prune_below` times (1 = keep everything). Contexts that only ever appeared once
-    /// then back off to the next lower order, which shrinks the model (and its memory)
-    /// at a small cost in accuracy.
-    pub fn train_pruned(texts: &[Vec<u8>], order: usize, prune_below: u32) -> (Self, TrainStats) {
+    /// Like [`train`](Self::train), but with pruning (see [`Prune`]): pruned contexts back
+    /// off to the next shorter stored context, which shrinks the model and its memory.
+    pub fn train_pruned(texts: &[Vec<u8>], order: usize, prune: Prune) -> (Self, TrainStats) {
+        let prune_below = prune.min_count.max(1);
         assert!((1..=MAX_ORDER).contains(&order), "order must be 1..={MAX_ORDER}");
         let k = order;
         let m = k + 1;
@@ -165,7 +184,7 @@ impl LangModel {
             top.shrink_to_fit();
         }
 
-        // 2. Kneser–Ney continuation counts for lower orders:
+        // 2. Kneser–Ney continuation counts for lower orders (but see RAW_LEVELS below):
         //    cnt[L][g] = number of distinct letters x such that x·g was seen.
         let mut cnt: Vec<FxHashMap<u64, u32>> = (0..=k).map(|_| FxHashMap::default()).collect();
         cnt[k] = top;
@@ -175,6 +194,20 @@ impl LangModel {
                 *lower.entry(g % pow[l + 1]).or_insert(0) += 1;
             }
             cnt[l] = lower;
+        }
+        // Short contexts get plain counts instead (interpolated absolute discounting): their
+        // rows are what the dense n-gram tables used by the classic solvers and the known-text
+        // screen are built from, and continuation counts flatten towards uniform on a large
+        // corpus (almost every short n-gram follows many different letters). The full model
+        // reaches these rows only for contexts never seen at a longer length.
+        let raw_levels = RAW_LEVELS.min(k);
+        for l in 0..raw_levels {
+            let mut raw: FxHashMap<u64, u32> = FxHashMap::default();
+            for (&g, &c) in &cnt[k] {
+                let e = raw.entry(g % pow[l + 1]).or_insert(0);
+                *e = e.saturating_add(c);
+            }
+            cnt[l] = raw;
         }
 
         // 3. Build probability rows level by level (low to high), interpolating with the level
@@ -220,6 +253,8 @@ impl LangModel {
             let mut map = U64Map::with_capacity(nctx + 1);
             let mut probs: Vec<f32> = Vec::with_capacity(if top_level { 0 } else { nctx * ALPHABET });
             let mut rows: Vec<u8> = Vec::with_capacity(if top_level { nctx * ALPHABET } else { 0 });
+            let entropy_prune = prune.entropy > 0.0 && l >= PRUNE_MIN_LEVEL;
+            let mut p_row = [0f32; ALPHABET];
             let mut i = 0;
             while i < keys.len() {
                 let h = keys[i] / 26;
@@ -228,8 +263,6 @@ impl LangModel {
                     row[(keys[i] % 26) as usize] = counts[&keys[i]];
                     i += 1;
                 }
-                let ctx_index = map.len() as u32;
-                map.insert(h, ctx_index);
                 let s: u64 = row.iter().map(|&c| c as u64).sum();
                 let s = s as f64;
                 let mut lower = [1.0f32 / 26.0; ALPHABET];
@@ -248,14 +281,28 @@ impl LangModel {
                 let gamma: f64 = row.iter().filter(|&&c| c > 0).map(|&c| disc(c)).sum::<f64>() / s;
                 for w in 0..ALPHABET {
                     let c = row[w] as f64;
-                    let p = (((c - if row[w] > 0 { disc(row[w]) } else { 0.0 }).max(0.0) / s) + gamma * lower[w] as f64) as f32;
-                    if top_level {
-                        rows.push(quant(p));
-                    } else {
-                        probs.push(p);
+                    p_row[w] = (((c - if row[w] > 0 { disc(row[w]) } else { 0.0 }).max(0.0) / s) + gamma * lower[w] as f64) as f32;
+                }
+                // Entropy pruning: drop the context when its row adds little over the row it
+                // would back off to, weighted by how often the context occurs.
+                if entropy_prune {
+                    let kl: f64 = (0..ALPHABET)
+                        .filter(|&w| p_row[w] > 0.0)
+                        .map(|w| p_row[w] as f64 * (p_row[w] as f64 / lower[w] as f64).ln())
+                        .sum();
+                    if s * kl < prune.entropy {
+                        continue;
                     }
                 }
+                let ctx_index = map.len() as u32;
+                map.insert(h, ctx_index);
+                if top_level {
+                    rows.extend(p_row.iter().map(|&p| quant(p)));
+                } else {
+                    probs.extend_from_slice(&p_row);
+                }
             }
+            contexts_per_level[l] = map.len();
             built.push(Build { map, probs, rows });
         }
 

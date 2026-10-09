@@ -1,7 +1,7 @@
 //! `cryptok` — command-line interface for Cryptok Code Cracker 2.0.
 
 use cryptok_core::words::WordModel;
-use cryptok_core::lm::LangModel;
+use cryptok_core::lm::{LangModel, Prune};
 use cryptok_core::rkc::{self, RkcOptions, StepInfo};
 use cryptok_core::text::{enc, scrub, strip_gutenberg, unscrub};
 mod ocr;
@@ -26,8 +26,10 @@ USAGE:
                   known texts reloaded per search instead of held in memory.
                   --public: keep --host 127.0.0.1 but use the conservative limits, for a reverse proxy
                   on the same machine that does the authentication; requires --allowed-host. See docs/NGINX-SSO.md)
-  cryptok train  [--corpus DIR[,DIR...]] [--order N] [--prune N] [--out FILE] [--exclude a.txt,b.txt]
-                 (--prune N drops order-N n-grams seen fewer than N times: a smaller, lighter model)
+  cryptok train  [--corpus DIR[,DIR...]] [--order N] [--prune-entropy T] [--prune N] [--out FILE] [--exclude a.txt,b.txt]
+                 (--prune-entropy T drops contexts whose predictions barely differ from the shorter
+                  context they back off to, weighted by count; default 0.5, 0 keeps everything.
+                  --prune N also drops order-N n-grams seen fewer than N times)
   cryptok eval   [--model FILE] [--corpus DIR[,DIR...]] --files a.txt,b.txt
                  (held-out cross-entropy in bits per letter; lower is better)
   cryptok score  [--model FILE] TEXT...
@@ -81,7 +83,7 @@ USAGE:
 HINTS are aligned with the cipher's letters; use '_' (or '?' or '.') for unknown positions,
 e.g. --plain-hint '____THE_____'. Non-letter characters in CIPHER are ignored.
 
-Defaults: --corpus corpus[,corpus-extra]  --order 6  --model/--out cryptok.cklm  --beam 100000  --results 10
+Defaults: --corpus corpus[,corpus-gutenberg][,corpus-extra]  --order 6  --model/--out cryptok.cklm  --beam 100000  --results 10
 ";
 
 struct Args {
@@ -176,10 +178,12 @@ fn main() -> ExitCode {
     }
 }
 
-/// Corpus directories: `--corpus a,b` (default `corpus`, plus `corpus-extra` when it exists).
+/// Corpus directories: `--corpus a,b` (default `corpus`, plus `corpus-gutenberg` and
+/// `corpus-extra` when they exist; see scripts/fetch-gutenberg.sh and scripts/fetch-corpora.sh).
 fn corpus_dirs(a: &Args) -> Vec<PathBuf> {
-    let default = if Path::new("corpus-extra").is_dir() { "corpus,corpus-extra" } else { "corpus" };
-    a.get("corpus", default).split(',').filter(|s| !s.is_empty()).map(PathBuf::from).collect()
+    let mut default = vec!["corpus"];
+    default.extend(["corpus-gutenberg", "corpus-extra"].into_iter().filter(|d| Path::new(d).is_dir()));
+    a.get("corpus", &default.join(",")).split(',').filter(|s| !s.is_empty()).map(PathBuf::from).collect()
 }
 
 /// Read a corpus file by name from the first corpus directory that has it.
@@ -206,7 +210,7 @@ fn cmd_train(a: &Args) -> Result<(), String> {
     let out = PathBuf::from(a.get("out", "cryptok.cklm"));
     let exclude: Vec<String> = a.get("exclude", "").split(',').filter(|s| !s.is_empty()).map(String::from).collect();
     let t = Instant::now();
-    let (lm, st) = LangModel::train_dir_pruned(&corpus, order, &exclude, a.num("prune", 1)? as u32).map_err(|e| e.to_string())?;
+    let (lm, st) = LangModel::train_dir_pruned(&corpus, order, &exclude, Prune { min_count: a.num("prune", 1)? as u32, entropy: num_f32(a, "prune-entropy", "0.5")? as f64 }).map_err(|e| e.to_string())?;
     let words_path = out.with_extension("words");
     let wm = WordModel::from_corpus(&corpus, &exclude, 3, a.has("trigram")).map_err(|e| e.to_string())?;
     wm.save(&words_path).map_err(|e| format!("{}: {e}", words_path.display()))?;

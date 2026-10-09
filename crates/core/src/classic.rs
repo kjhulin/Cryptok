@@ -85,6 +85,8 @@ const POLISH: usize = 3;
 /// Below this many letters, likely periods also get simulated annealing.
 const SHORT_TEXT: usize = 120;
 const ANNEAL_RUNS: usize = 8;
+/// Beam width of the column-by-column search for very short texts.
+const BEAM_WIDTH: usize = 5_000;
 const ANNEAL_ITERS: usize = 50_000;
 
 /// N-gram size for hill climbing: short texts need 5-grams to separate English from
@@ -240,6 +242,54 @@ pub fn anneal(lm: &LangModel, cipher: &[u8], a: &Alphabet, period: usize, iters:
     polish(lm, cipher, a, best.0)
 }
 
+/// Beam search over column shifts for very short texts, where hill climbing and annealing
+/// get trapped. Columns are assigned 0, 1, 2, ... in turn; each letter of the new column is
+/// scored with the full model, using as context the preceding letters whose columns are
+/// already assigned (so early columns are judged on short contexts and later ones on long
+/// contexts). Returns the best complete assignments, to be polished with the full model.
+fn beam_columns(lm: &LangModel, cipher: &[u8], a: &Alphabet, p: usize, width: usize, keep: usize) -> Vec<Vec<u8>> {
+    let n = cipher.len();
+    let order = lm.order();
+    let deq = lm.deq();
+    let dec = |c: u8, s: u8| a.letters[((a.index[c as usize] + 26 - s) % 26) as usize];
+    let mut states: Vec<(Vec<u8>, f32)> = vec![(Vec::new(), 0.0)];
+    for step in 0..p {
+        let mut next: Vec<(Vec<u8>, f32)> = Vec::with_capacity(states.len() * 26);
+        for (shifts, sc) in &states {
+            // Contexts of this column's letters depend only on the assigned columns.
+            let ctxs: Vec<(u64, usize)> = (step..n)
+                .step_by(p)
+                .map(|i| {
+                    let len = (if step == p - 1 { i.min(p - 1) } else { i.min(step) }).min(order);
+                    let mut ctx = 0u64;
+                    for k in i - len..i {
+                        ctx = ctx * 26 + dec(cipher[k], shifts[k % p]) as u64;
+                    }
+                    (ctx, len)
+                })
+                .collect();
+            for s in 0..26u8 {
+                let mut t = *sc;
+                for (j, i) in (step..n).step_by(p).enumerate() {
+                    let (ctx, len) = ctxs[j];
+                    t += deq[lm.row(ctx, len)[dec(cipher[i], s) as usize] as usize];
+                }
+                let mut v = Vec::with_capacity(p);
+                v.extend_from_slice(shifts);
+                v.push(s);
+                next.push((v, t));
+            }
+        }
+        if next.len() > width {
+            next.select_nth_unstable_by(width, |x, y| y.1.total_cmp(&x.1));
+            next.truncate(width);
+        }
+        states = next;
+    }
+    states.sort_by(|x, y| y.1.total_cmp(&x.1));
+    states.into_iter().take(keep).map(|x| x.0).collect()
+}
+
 /// Column shifts that exactly maximise the bigram log-probability of the decryption.
 /// Adjacent letters fall in adjacent columns (wrapping to column 0 on the next row), so
 /// the objective is a cycle of pairwise terms: fix column 0's shift, then dynamic
@@ -369,6 +419,12 @@ pub fn solve_vigenere_with(lm: &LangModel, q: &DenseNgram, cipher: &[u8], a: &Al
         // Very short texts: hill climbing gets trapped, so the most likely periods (by
         // index of coincidence) also get several simulated-annealing runs.
         if n < SHORT_TEXT && ic_top.contains(&period) {
+            for c in beam_columns(lm, cipher, a, period, BEAM_WIDTH, POLISH) {
+                let r = polish(lm, cipher, a, c);
+                if r.1 > best.1 {
+                    best = r;
+                }
+            }
             let runs: Vec<(Vec<u8>, f32)> = std::thread::scope(|sc| {
                 let hs: Vec<_> = (0..ANNEAL_RUNS)
                     .map(|run| sc.spawn(move || anneal(lm, cipher, a, period, ANNEAL_ITERS, 0x5DEE_CE66_D ^ ((period as u64) << 32) ^ run as u64)))

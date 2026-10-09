@@ -52,11 +52,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - name: Fetch extra training text
+        run: |
+          ./scripts/fetch-gutenberg.sh
+          ./scripts/fetch-corpora.sh
       - run: cargo run --release -- train --out cryptok.cklm
       - uses: actions/upload-artifact@v7
         with:
           name: cryptok-model
-          path: cryptok.cklm
+          path: |
+            cryptok.cklm
+            cryptok.words
 
   publish:
     needs: [build, model]
