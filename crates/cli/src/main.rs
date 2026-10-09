@@ -23,8 +23,8 @@ USAGE:
                   --max-conns --max-jobs --job-timeout SECS --max-letters --max-beam --max-keywords.
                   --public: keep --host 127.0.0.1 but use the conservative limits, for a reverse proxy
                   on the same machine that does the authentication; requires --allowed-host. See docs/NGINX-SSO.md)
-  cryptok train  [--corpus DIR] [--order N] [--out FILE] [--exclude a.txt,b.txt]
-  cryptok eval   [--model FILE] [--corpus DIR] --files a.txt,b.txt
+  cryptok train  [--corpus DIR[,DIR...]] [--order N] [--out FILE] [--exclude a.txt,b.txt]
+  cryptok eval   [--model FILE] [--corpus DIR[,DIR...]] --files a.txt,b.txt
                  (held-out cross-entropy in bits per letter; lower is better)
   cryptok score  [--model FILE] TEXT...
   cryptok rkc    [--model FILE] [--beam N] [--results N] [--threads N]
@@ -71,13 +71,13 @@ USAGE:
                  [--rkc-beam N] [--word-weight W] [--pass 0.9] [--out results.tsv] [--verbose]
                  (run every solver automatically on contest ciphers with known answers and
                   report which ones fall; see bench/contests.tsv)
-  cryptok bench gen [--corpus DIR] --holdout a.txt,b.txt [--out FILE] [--seed N] [--per-length N]
+  cryptok bench gen [--corpus DIR[,DIR...]] --holdout a.txt,b.txt [--out FILE] [--seed N] [--per-length N]
   cryptok bench run [--model FILE] [--cases FILE] [--beam N] [--threads N]
 
 HINTS are aligned with the cipher's letters; use '_' (or '?' or '.') for unknown positions,
 e.g. --plain-hint '____THE_____'. Non-letter characters in CIPHER are ignored.
 
-Defaults: --corpus corpus  --order 6  --model/--out cryptok.cklm  --beam 100000  --results 10
+Defaults: --corpus corpus[,corpus-extra]  --order 6  --model/--out cryptok.cklm  --beam 100000  --results 10
 ";
 
 struct Args {
@@ -87,7 +87,7 @@ struct Args {
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
-    const SWITCHES: &[&str] = &["quiet", "help", "no-open", "double", "exhaustive", "verbose", "digits", "raw", "insecure-no-auth", "public"];
+    const SWITCHES: &[&str] = &["quiet", "help", "no-open", "double", "exhaustive", "verbose", "digits", "raw", "insecure-no-auth", "public", "unigram", "trigram"];
     let mut a = Args { flags: HashMap::new(), switches: vec![], pos: vec![] };
     let mut i = 0;
     while i < args.len() {
@@ -172,6 +172,22 @@ fn main() -> ExitCode {
     }
 }
 
+/// Corpus directories: `--corpus a,b` (default `corpus`, plus `corpus-extra` when it exists).
+fn corpus_dirs(a: &Args) -> Vec<PathBuf> {
+    let default = if Path::new("corpus-extra").is_dir() { "corpus,corpus-extra" } else { "corpus" };
+    a.get("corpus", default).split(',').filter(|s| !s.is_empty()).map(PathBuf::from).collect()
+}
+
+/// Read a corpus file by name from the first corpus directory that has it.
+fn read_corpus_file(dirs: &[PathBuf], name: &str) -> Result<Vec<u8>, String> {
+    for d in dirs {
+        if let Ok(b) = std::fs::read(d.join(name)) {
+            return Ok(b);
+        }
+    }
+    Err(format!("{name}: not found in any corpus directory"))
+}
+
 fn load_model(a: &Args) -> Result<LangModel, String> {
     let p = PathBuf::from(a.get("model", "cryptok.cklm"));
     let t = Instant::now();
@@ -181,12 +197,16 @@ fn load_model(a: &Args) -> Result<LangModel, String> {
 }
 
 fn cmd_train(a: &Args) -> Result<(), String> {
-    let corpus = PathBuf::from(a.get("corpus", "corpus"));
+    let corpus = corpus_dirs(a);
     let order = a.num("order", 6)?;
     let out = PathBuf::from(a.get("out", "cryptok.cklm"));
     let exclude: Vec<String> = a.get("exclude", "").split(',').filter(|s| !s.is_empty()).map(String::from).collect();
     let t = Instant::now();
     let (lm, st) = LangModel::train_dir(&corpus, order, &exclude).map_err(|e| e.to_string())?;
+    let words_path = out.with_extension("words");
+    let wm = WordModel::from_corpus(&corpus, &exclude, 3, a.has("trigram")).map_err(|e| e.to_string())?;
+    wm.save(&words_path).map_err(|e| format!("{}: {e}", words_path.display()))?;
+    eprintln!("wrote {} ({} words)", words_path.display(), wm.vocab_size());
     let tt = t.elapsed().as_secs_f64();
     lm.save(&out).map_err(|e| e.to_string())?;
     let size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
@@ -199,11 +219,11 @@ fn cmd_train(a: &Args) -> Result<(), String> {
 
 fn cmd_eval(a: &Args) -> Result<(), String> {
     let lm = load_model(a)?;
-    let corpus = PathBuf::from(a.get("corpus", "corpus"));
+    let corpus = corpus_dirs(a);
     let mut total = 0f64;
     let mut letters = 0usize;
     for f in a.get("files", "").split(',').filter(|s| !s.is_empty()) {
-        let b = std::fs::read(corpus.join(f)).map_err(|e| format!("{f}: {e}"))?;
+        let b = read_corpus_file(&corpus, f)?;
         let l = scrub(strip_gutenberg(&String::from_utf8_lossy(&b)));
         // Score in 1,000-letter chunks (the model starts each chunk without context).
         for ch in l.chunks(1000) {
@@ -771,7 +791,7 @@ impl Lcg {
 const BENCH_LENGTHS: &[usize] = &[40, 60, 100, 150, 300];
 
 fn cmd_bench_gen(a: &Args) -> Result<(), String> {
-    let corpus = PathBuf::from(a.get("corpus", "corpus"));
+    let corpus = corpus_dirs(a);
     let holdout: Vec<String> = a.get("holdout", "").split(',').filter(|s| !s.is_empty()).map(String::from).collect();
     if holdout.len() < 2 {
         return Err("--holdout needs at least two files (key and plaintext come from different books)".into());
@@ -782,7 +802,7 @@ fn cmd_bench_gen(a: &Args) -> Result<(), String> {
     let texts: Vec<Vec<u8>> = holdout
         .iter()
         .map(|h| {
-            let s = std::fs::read(corpus.join(h)).map_err(|e| format!("{h}: {e}"))?;
+            let s = read_corpus_file(&corpus, h)?;
             Ok(scrub(strip_gutenberg(&String::from_utf8_lossy(&s))))
         })
         .collect::<Result<_, String>>()?;
@@ -878,9 +898,9 @@ fn cmd_bench_run(a: &Args) -> Result<(), String> {
 
 /// Diagnostic: does the truth outscore the solver's answer under the char / word models?
 fn cmd_bench_diag(a: &Args, lm: &LangModel, cases: &[(String, Vec<u8>, Vec<u8>, Vec<u8>)]) -> Result<(), String> {
-    let corpus = PathBuf::from(a.get("corpus", "corpus"));
+    let corpus = corpus_dirs(a);
     let excl: Vec<String> = a.get("word-exclude", "1342.txt,2701.txt,84.txt").split(',').filter(|s| !s.is_empty()).map(String::from).collect();
-    let wm = WordModel::from_corpus(&corpus, &excl, a.num("min-count", 3)? as u32).map_err(|e| e.to_string())?;
+    let wm = WordModel::from_corpus(&corpus, &excl, a.num("min-count", 3)? as u32, a.has("trigram")).map_err(|e| e.to_string())?;
     let opts = RkcOptions { beam: a.num("beam", 10_000)?, results: 1, threads: a.num("threads", 0)?, ..Default::default() };
     println!("{:>4} {:>5} {:>6} {:>9} {:>9} {:>9}", "id", "len", "acc%", "d_char", "d_word", "d_all(w=1)");
     let (mut cwin, mut wwin, mut awin, mut n) = (0, 0, 0, 0);
@@ -913,19 +933,31 @@ fn num_f32(a: &Args, k: &str, d: &str) -> Result<f32, String> {
 
 /// `default_exclude` lists corpus files left out of the word model (the benchmark holds books out).
 fn word_setup(a: &Args, default_exclude: &str) -> Result<Option<Words>, String> {
-    let weight = num_f32(a, "word-weight", "0.3")?;
+    let weight = num_f32(a, "word-weight", "0.4")?;
     if weight <= 0.0 {
         return Ok(None);
     }
-    let corpus = PathBuf::from(a.get("corpus", "corpus"));
-    if !corpus.is_dir() {
-        eprintln!("note: corpus directory {} not found, solving without the word model", corpus.display());
-        return Ok(None);
-    }
-    let excl: Vec<String> = a.get("word-exclude", default_exclude).split(',').filter(|s| !s.is_empty()).map(String::from).collect();
     let t = Instant::now();
-    let model = WordModel::from_corpus(&corpus, &excl, a.num("min-count", 3)? as u32).map_err(|e| e.to_string())?;
+    let sibling = PathBuf::from(a.get("model", "cryptok.cklm")).with_extension("words");
+    let model = if !a.flags.contains_key("corpus") && !a.flags.contains_key("word-exclude") && sibling.is_file() {
+        WordModel::load(&sibling).map_err(|e| format!("{}: {e}", sibling.display()))?
+    } else {
+        let corpus = corpus_dirs(a);
+        if !corpus.iter().all(|d| d.is_dir()) {
+            eprintln!("note: no word list ({}) and no corpus directory, solving without the word model", sibling.display());
+            return Ok(None);
+        }
+        let excl: Vec<String> = a.get("word-exclude", default_exclude).split(',').filter(|s| !s.is_empty()).map(String::from).collect();
+        WordModel::from_corpus(&corpus, &excl, a.num("min-count", 3)? as u32, a.has("trigram")).map_err(|e| e.to_string())?
+    };
+    let model = if a.has("unigram") {
+        model.without_bigrams()
+    } else if a.has("trigram") {
+        model
+    } else {
+        model.without_trigrams()
+    };
     let trie = model.trie().with_oov(num_f32(a, "oov-base", "-4")?, num_f32(a, "oov-per", "-3.5")?);
-    eprintln!("word model: {} words in {:.2}s (weight {weight})", model.vocab_size(), t.elapsed().as_secs_f64());
+    eprintln!("word model: {} words, {} pairs, {} triples in {:.2}s (weight {weight})", model.vocab_size(), model.bigram_count(), model.trigram_count(), t.elapsed().as_secs_f64());
     Ok(Some(Words { model, trie, weight }))
 }

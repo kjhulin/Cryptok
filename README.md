@@ -73,6 +73,19 @@ cryptok vigenere --alphabet ",KRYPTOS" "$(cat bench/kryptos/k2.txt)"
 cryptok score "some text"                      # language-model score
 ```
 
+## Training text
+
+`corpus/` (committed) holds Project Gutenberg books and US presidential speeches (public domain).
+Gutenberg is mostly 19th-century prose, so `scripts/fetch-corpora.sh` can add modern text from the
+NLTK data repository (Brown corpus, Reuters newswire, movie reviews, web text) into `corpus-extra/`.
+That text is research-licensed, so it is git-ignored and never committed; `cryptok train` picks it up
+automatically when present (`--corpus corpus,corpus-extra`). Training also writes `cryptok.words`,
+the word list used by the word model, next to the model.
+
+On held-out text, adding the extra corpora lifts running-key accuracy on modern text from 58% to 74% and
+on the DEF CON 20 cipher from 68% to 74%, at a small cost on 19th-century books (83% to 82%).
+Release binaries ship a model trained with all of it.
+
 ## Releases and CI
 
 GitHub Actions runs build + tests on Linux, macOS and Windows for every PR, plus an accuracy gate
@@ -99,7 +112,7 @@ Test ciphers are generated from books held out of training. Accuracy counts a po
 ## How it works
 
 - **Language model** (`crates/core/src/lm.rs`): order-6 character model with interpolated Kneser–Ney smoothing, trained on Project Gutenberg texts with licence boilerplate stripped. Every stored context has a full row of quantised log-probabilities, so scoring a letter is one hash lookup.
-- **Word model** (`crates/core/src/words.rs`): word frequencies from the corpus. During the beam search every hypothesis tracks the best word segmentation of its key and plaintext so far, and new letters are scored by how much they improve it (weight `--word-weight`, default 0.3; 0 turns it off). The character model cannot see spaces; this adds the information that `REDSHIRTENGINEER` is words. On the 60-case benchmark it lifts mean accuracy from 80.1% to ~84% (DEF CON 23 blind: 45% to 77%), at about 3.5x the time per cipher. Results are displayed with the discovered word breaks.
+- **Word model** (`crates/core/src/words.rs`): word and word-pair (bigram) statistics from the corpus, saved as `cryptok.words` next to the model. During the beam search every hypothesis tracks the best word segmentation of its key and plaintext so far, scoring each word given the one before it (absolute-discounted bigram, backing off to the word frequency), and each new letter is scored by how much it improves that segmentation (weight `--word-weight`, default 0.4; 0 turns it off). The character model cannot see spaces; this adds the information that `REDSHIRTENGINEER` is words. It lifts mean accuracy on held-out text by several points (DEF CON 23 blind: 45% to 77%) at about 3.5x the time per cipher, and results are displayed with the discovered word breaks. Unigram-only is `--unigram`; word triples (`--trigram`) are supported but did not help.
 - **RKC solver** (`crates/core/src/rkc.rs`): Viterbi beam search over (key, plaintext) pairs that merges hypotheses sharing the same last 6 key letters, prunes key/plaintext mirror duplicates, uses back-pointers, and expands candidates on all cores.
 
 ## Layout
