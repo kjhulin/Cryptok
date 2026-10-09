@@ -200,7 +200,8 @@ impl LangModel {
         // screen are built from, and continuation counts flatten towards uniform on a large
         // corpus (almost every short n-gram follows many different letters). The full model
         // reaches these rows only for contexts never seen at a longer length.
-        let raw_levels = RAW_LEVELS.min(k);
+        // Only for models that keep at least two Kneser–Ney levels above them (order 6+, the default).
+        let raw_levels = if k > RAW_LEVELS + 1 { RAW_LEVELS } else { 0 };
         for l in 0..raw_levels {
             let mut raw: FxHashMap<u64, u32> = FxHashMap::default();
             for (&g, &c) in &cnt[k] {
