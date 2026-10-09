@@ -25,6 +25,28 @@ const PRUNE_MIN_LEVEL: usize = 3;
 /// Levels (context lengths) below this use plain counts rather than Kneser–Ney continuation counts.
 const RAW_LEVELS: usize = 4;
 
+/// The stages of [`LangModel::train_pruned_progress`], in the order they run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrainStage {
+    /// Reading and cleaning the corpus files.
+    Read,
+    /// Counting n-grams.
+    Count,
+    /// Deriving the lower-order counts.
+    Smooth,
+    /// Building the probability tables, level by level.
+    Build,
+    /// Squeezing the tables to one byte per probability.
+    Quantise,
+}
+
+/// Called during training with the current stage and how much of that stage is done (0.0 to 1.0).
+/// It can run thousands of times, so keep it cheap.
+pub type ProgressFn<'a> = &'a dyn Fn(TrainStage, f64);
+
+/// Keys between progress reports while building the tables.
+const PROGRESS_EVERY: usize = 1 << 14;
+
 /// Model pruning options for training.
 #[derive(Debug, Clone, Copy)]
 pub struct Prune {
@@ -140,15 +162,22 @@ impl LangModel {
 
     /// [`train_dir`](Self::train_dir) with pruning (see [`Prune`]).
     pub fn train_dir_pruned(dirs: &[PathBuf], order: usize, exclude: &[String], prune: Prune) -> io::Result<(Self, TrainStats)> {
+        Self::train_dir_progress(dirs, order, exclude, prune, &|_, _| {})
+    }
+
+    /// [`train_dir_pruned`](Self::train_dir_pruned) that reports how far each stage has got.
+    pub fn train_dir_progress(dirs: &[PathBuf], order: usize, exclude: &[String], prune: Prune, progress: ProgressFn) -> io::Result<(Self, TrainStats)> {
         let names = crate::text::corpus_files(dirs, exclude)?;
-        let mut texts = Vec::with_capacity(names.len());
-        for p in names {
+        let total = names.len();
+        let mut texts = Vec::with_capacity(total);
+        for (i, p) in names.into_iter().enumerate() {
+            progress(TrainStage::Read, i as f64 / total as f64);
             let mut buf = Vec::new();
             fs::File::open(&p)?.read_to_end(&mut buf)?;
             let s = String::from_utf8_lossy(&buf);
             texts.push(scrub(strip_gutenberg(&s)));
         }
-        Ok(Self::train_pruned(&texts, order, prune))
+        Ok(Self::train_pruned_progress(&texts, order, prune, progress))
     }
 
     /// Train from pre-scrubbed letter sequences.
@@ -159,6 +188,11 @@ impl LangModel {
     /// Like [`train`](Self::train), but with pruning (see [`Prune`]): pruned contexts back
     /// off to the next shorter stored context, which shrinks the model and its memory.
     pub fn train_pruned(texts: &[Vec<u8>], order: usize, prune: Prune) -> (Self, TrainStats) {
+        Self::train_pruned_progress(texts, order, prune, &|_, _| {})
+    }
+
+    /// [`train_pruned`](Self::train_pruned) that reports how far each stage has got.
+    pub fn train_pruned_progress(texts: &[Vec<u8>], order: usize, prune: Prune, progress: ProgressFn) -> (Self, TrainStats) {
         let prune_below = prune.min_count.max(1);
         assert!((1..=MAX_ORDER).contains(&order), "order must be 1..={MAX_ORDER}");
         let k = order;
@@ -167,8 +201,10 @@ impl LangModel {
 
         // 1. Raw counts of (k+1)-grams.
         let mut letters = 0u64;
+        let total_letters = texts.iter().map(|t| t.len() as f64).sum::<f64>().max(1.0);
         let mut top: FxHashMap<u64, u32> = FxHashMap::default();
         for t in texts {
+            progress(TrainStage::Count, letters as f64 / total_letters);
             letters += t.len() as u64;
             let mut r = 0u64;
             for (i, &c) in t.iter().enumerate() {
@@ -189,6 +225,7 @@ impl LangModel {
         let mut cnt: Vec<FxHashMap<u64, u32>> = (0..=k).map(|_| FxHashMap::default()).collect();
         cnt[k] = top;
         for l in (0..k).rev() {
+            progress(TrainStage::Smooth, (k - 1 - l) as f64 / k as f64);
             let mut lower: FxHashMap<u64, u32> = FxHashMap::default();
             for &g in cnt[l + 1].keys() {
                 *lower.entry(g % pow[l + 1]).or_insert(0) += 1;
@@ -223,6 +260,8 @@ impl LangModel {
             rows: Vec<u8>,
         }
         let quant = |p: f32| (-(p.max(1e-30)).ln() / STEP).round().clamp(0.0, 255.0) as u8;
+        let total_keys = cnt.iter().map(|c| c.len()).sum::<usize>().max(1) as f64;
+        let mut keys_done = 0usize;
         let mut built: Vec<Build> = Vec::with_capacity(k + 1);
         let mut discounts = Vec::with_capacity(k + 1);
         let mut contexts_per_level = Vec::with_capacity(k + 1);
@@ -258,6 +297,9 @@ impl LangModel {
             let mut p_row = [0f32; ALPHABET];
             let mut i = 0;
             while i < keys.len() {
+                if i % PROGRESS_EVERY == 0 {
+                    progress(TrainStage::Build, (keys_done + i) as f64 / total_keys);
+                }
                 let h = keys[i] / 26;
                 let mut row = [0u32; ALPHABET];
                 while i < keys.len() && keys[i] / 26 == h {
@@ -304,10 +346,12 @@ impl LangModel {
                 }
             }
             contexts_per_level[l] = map.len();
+            keys_done += keys.len();
             built.push(Build { map, probs, rows });
         }
 
         // 4. Quantise the lower levels (the top level already is).
+        progress(TrainStage::Quantise, 0.0);
         let levels = built
             .into_iter()
             .map(|b| Level { map: b.map, rows: if b.rows.is_empty() { b.probs.iter().map(|&p| quant(p)).collect() } else { b.rows } })
@@ -465,6 +509,27 @@ mod tests {
             let total: f32 = row.iter().map(|&q| lm.deq()[q as usize].exp()).sum();
             assert!((total - 1.0).abs() < 0.08, "row sums to {total}");
         }
+    }
+
+    #[test]
+    fn training_reports_every_stage_in_order() {
+        let texts: Vec<Vec<u8>> = (0..3).map(|_| scrub(&"the quick brown fox jumps over the lazy dog ".repeat(40))).collect();
+        let seen = std::cell::RefCell::new(Vec::new());
+        let (with, _) = LangModel::train_pruned_progress(&texts, 3, Prune::default(), &|stage, f| seen.borrow_mut().push((stage, f)));
+        let seen = seen.into_inner();
+        assert!(seen.iter().all(|&(_, f)| (0.0..=1.0).contains(&f)), "fraction out of range: {seen:?}");
+        let order = [TrainStage::Count, TrainStage::Smooth, TrainStage::Build, TrainStage::Quantise];
+        let mut stages: Vec<TrainStage> = seen.iter().map(|&(s, _)| s).collect();
+        stages.dedup();
+        assert_eq!(stages, order);
+        for stage in order {
+            let f: Vec<f64> = seen.iter().filter(|&&(s, _)| s == stage).map(|&(_, f)| f).collect();
+            assert!(f.windows(2).all(|w| w[0] <= w[1]), "{stage:?} went backwards: {f:?}");
+        }
+        // Reporting progress must not change the model.
+        let (without, _) = LangModel::train(&texts, 3);
+        let probe = scrub("thequickbrownfox");
+        assert_eq!(with.score(&probe), without.score(&probe));
     }
 
     #[test]

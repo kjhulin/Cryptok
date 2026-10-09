@@ -26,4 +26,4 @@ pub mod words;
 mod testutil;
 pub mod transpo;
 
-pub use lm::LangModel;
+pub use lm::{LangModel, TrainStage};

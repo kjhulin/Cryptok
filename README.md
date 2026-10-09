@@ -18,6 +18,7 @@ No external crates are required.
 ```
 scripts/fetch-gutenberg.sh   # optional, recommended: ~1,800 more books (720 MB) into corpus-gutenberg/
 cryptok train          # once: learns the corpus -> cryptok.cklm (~2 min and ~190 MB with the extra books; ~5 s and ~35 MB without)
+                       # shows a progress bar in a terminal (one line per 10% when piped or in CI)
 cryptok serve          # opens the web UI at http://127.0.0.1:8077/
 ```
 

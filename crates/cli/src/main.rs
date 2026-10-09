@@ -1,10 +1,11 @@
 //! `cryptok` — command-line interface for Cryptok Code Cracker 2.0.
 
 use cryptok_core::words::WordModel;
-use cryptok_core::lm::{LangModel, Prune};
+use cryptok_core::lm::{LangModel, Prune, TrainStage};
 use cryptok_core::rkc::{self, RkcOptions, StepInfo};
 use cryptok_core::text::{enc, scrub, strip_gutenberg, unscrub};
 mod ocr;
+mod progress;
 mod serve;
 
 use std::collections::HashMap;
@@ -204,19 +205,49 @@ fn load_model(a: &Args) -> Result<LangModel, String> {
     Ok(lm)
 }
 
+/// Where each training stage sits on the overall bar: (start, share) of 0..1, roughly in
+/// proportion to the time each takes.
+fn train_span(stage: TrainStage) -> (f64, f64) {
+    match stage {
+        TrainStage::Read => (0.000, 0.025),
+        TrainStage::Count => (0.025, 0.235),
+        TrainStage::Smooth => (0.260, 0.080),
+        TrainStage::Build => (0.340, 0.320),
+        TrainStage::Quantise => (0.660, 0.010),
+    }
+}
+
+/// The word model takes the stretch after the language model, up to saving.
+const WORDS_SPAN: (f64, f64) = (0.670, 0.310);
+
 fn cmd_train(a: &Args) -> Result<(), String> {
     let corpus = corpus_dirs(a);
     let order = a.num("order", 6)?;
     let out = PathBuf::from(a.get("out", "cryptok.cklm"));
     let exclude: Vec<String> = a.get("exclude", "").split(',').filter(|s| !s.is_empty()).map(String::from).collect();
     let t = Instant::now();
-    let (lm, st) = LangModel::train_dir_pruned(&corpus, order, &exclude, Prune { min_count: a.num("prune", 1)? as u32, entropy: num_f32(a, "prune-entropy", "0.5")? as f64 }).map_err(|e| e.to_string())?;
+    let bar = progress::Bar::new();
+    let label = |s: TrainStage| match s {
+        TrainStage::Read => "Reading texts",
+        TrainStage::Count => "Counting n-grams",
+        TrainStage::Smooth => "Smoothing counts",
+        TrainStage::Build => "Building model",
+        TrainStage::Quantise => "Compressing model",
+    };
+    let on_progress = |stage: TrainStage, f: f64| {
+        let (start, share) = train_span(stage);
+        bar.set(label(stage), start + share * f);
+    };
+    let (lm, st) = LangModel::train_dir_progress(&corpus, order, &exclude, Prune { min_count: a.num("prune", 1)? as u32, entropy: num_f32(a, "prune-entropy", "0.5")? as f64 }, &on_progress).map_err(|e| e.to_string())?;
     let words_path = out.with_extension("words");
-    let wm = WordModel::from_corpus(&corpus, &exclude, 3, a.has("trigram")).map_err(|e| e.to_string())?;
+    let wm = WordModel::from_corpus_progress(&corpus, &exclude, 3, a.has("trigram"), &|f| bar.set("Counting words", WORDS_SPAN.0 + WORDS_SPAN.1 * f)).map_err(|e| e.to_string())?;
+    bar.set("Saving", 0.98);
     wm.save(&words_path).map_err(|e| format!("{}: {e}", words_path.display()))?;
-    eprintln!("wrote {} ({} words)", words_path.display(), wm.vocab_size());
     let tt = t.elapsed().as_secs_f64();
     lm.save(&out).map_err(|e| e.to_string())?;
+    bar.set("Done", 1.0);
+    bar.finish();
+    eprintln!("wrote {} ({} words)", words_path.display(), wm.vocab_size());
     let size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
     println!("trained order-{order} model on {} letters in {tt:.1}s", st.letters);
     println!("contexts per level: {:?}", st.contexts_per_level);

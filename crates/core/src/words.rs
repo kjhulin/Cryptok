@@ -153,23 +153,46 @@ fn vocabulary(counts: FxHashMap<Vec<u8>, u32>, min_count: u32) -> Vec<(Vec<u8>, 
     kept
 }
 
+/// How progress splits across the stages of building a word model: reading the files, then
+/// (of the rest) counting words, then counting pairs, then the remaining work (triples, tables).
+const READ_SHARE: f64 = 0.05;
+const COUNT_SHARE: f64 = 0.45;
+const PAIR_SHARE: f64 = 0.8;
+
 impl WordModel {
     /// Build from raw text files in the corpus directories (Gutenberg boilerplate stripped),
     /// skipping the file names in `exclude`. Words seen fewer than `min_count` times are dropped.
     /// Word triples are only collected when `trigrams` is set (they did not improve accuracy).
     pub fn from_corpus(dirs: &[PathBuf], exclude: &[String], min_count: u32, trigrams: bool) -> io::Result<Self> {
-        let mut texts = Vec::new();
-        for p in crate::text::corpus_files(dirs, exclude)? {
-            let bytes = fs::read(&p)?;
+        Self::from_corpus_progress(dirs, exclude, min_count, trigrams, &|_| {})
+    }
+
+    /// [`from_corpus`](Self::from_corpus) that reports the fraction done (0.0 to 1.0) as it goes.
+    pub fn from_corpus_progress(dirs: &[PathBuf], exclude: &[String], min_count: u32, trigrams: bool, progress: &dyn Fn(f64)) -> io::Result<Self> {
+        let names = crate::text::corpus_files(dirs, exclude)?;
+        let total = names.len().max(1) as f64;
+        let mut texts = Vec::with_capacity(names.len());
+        for (i, p) in names.iter().enumerate() {
+            progress(READ_SHARE * i as f64 / total);
+            let bytes = fs::read(p)?;
             texts.push(strip_gutenberg(&String::from_utf8_lossy(&bytes)).to_string());
         }
-        Ok(Self::from_texts(&texts, min_count, trigrams))
+        Ok(Self::from_texts_progress(&texts, min_count, trigrams, progress))
     }
 
     /// Build from in-memory texts: word counts, then counts of adjacent in-vocabulary pairs.
     pub fn from_texts<S: AsRef<str>>(texts: &[S], min_count: u32, trigrams: bool) -> Self {
+        Self::from_texts_progress(texts, min_count, trigrams, &|_| {})
+    }
+
+    /// [`from_texts`](Self::from_texts) that reports the fraction done (0.0 to 1.0) as it goes.
+    /// Reading the files (when [`from_corpus_progress`](Self::from_corpus_progress) does it)
+    /// takes the first `READ_SHARE`; counting and pairing split the rest.
+    pub fn from_texts_progress<S: AsRef<str>>(texts: &[S], min_count: u32, trigrams: bool, progress: &dyn Fn(f64)) -> Self {
+        let n = texts.len().max(1) as f64;
         let mut counts: FxHashMap<Vec<u8>, u32> = FxHashMap::default();
-        for t in texts {
+        for (i, t) in texts.iter().enumerate() {
+            progress(READ_SHARE + (1.0 - READ_SHARE) * COUNT_SHARE * i as f64 / n);
             scan(t.as_ref(), |w| {
                 if let Some(w) = w {
                     *counts.entry(w.to_vec()).or_insert(0) += 1;
@@ -179,7 +202,8 @@ impl WordModel {
         let words = vocabulary(counts, min_count);
         let ids: FxHashMap<Vec<u8>, u32> = words.iter().enumerate().map(|(i, (w, _))| (w.clone(), i as u32)).collect();
         let mut pairs: FxHashMap<u64, u32> = FxHashMap::default();
-        for t in texts {
+        for (i, t) in texts.iter().enumerate() {
+            progress(READ_SHARE + (1.0 - READ_SHARE) * (COUNT_SHARE + (1.0 - COUNT_SHARE) * PAIR_SHARE * i as f64 / n));
             let mut prev = NONE;
             scan(t.as_ref(), |w| {
                 let id = w.and_then(|w| ids.get(w).copied()).unwrap_or(NONE);
