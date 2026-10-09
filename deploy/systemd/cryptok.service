@@ -7,8 +7,9 @@ After=network.target
 User=cryptok
 Group=cryptok
 WorkingDirectory=/opt/cryptok
+# Replace example.com with your host name.
 ExecStart=/opt/cryptok/cryptok serve --host 127.0.0.1 --port 8077 --no-open \
-          --public --allowed-host cryptok.space \
+          --public --allowed-host example.com \
           --model /opt/cryptok/cryptok.cklm --sources /opt/cryptok/corpus
 Restart=on-failure
 NoNewPrivileges=true

@@ -304,7 +304,7 @@ pre.plain { white-space: pre-wrap; word-break: break-all; font: 14px/1.6 var(--m
 
 <script>
 const $ = (s) => document.querySelector(s);
-// API calls use relative URLs so the page works under a path prefix (e.g. https://host/solver/).
+// API calls use relative URLs so the page works under a path prefix (e.g. https://host/cryptok/).
 // Everything that reaches innerHTML from the server or the user goes through esc().
 const esc = (v) => String(v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const L = (i) => String.fromCharCode(65 + i);
