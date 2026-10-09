@@ -813,7 +813,12 @@ fn api_rkc(stream: TcpStream, st: &ServerState, req: &Request) -> std::io::Resul
             sse.send("progress", &format!("{{\"step\":{},\"total\":{},\"best\":{}}}", s.step, s.total, sols_json(s.best, wm)));
         }
     };
-    let sols = with_deadline(st, &sse, || rkc::solve_words(&st.lm, st.words.as_ref().map(|w| &w.1), &cipher, &opts, Some(&mut cb), Some(&sse.gone)));
+    let mut sols = with_deadline(st, &sse, || rkc::solve_words(&st.lm, st.words.as_ref().map(|w| &w.1), &cipher, &opts, Some(&mut cb), Some(&sse.gone)));
+    if let Some((wm, trie, _)) = &st.words {
+        if !sse.gone.load(Ordering::Relaxed) {
+            rkc::untangle_results(&st.lm, wm, Some(trie), &opts, &mut sols);
+        }
+    }
     if !sse.gone.load(Ordering::Relaxed) {
         sse.send("done", &format!("{{\"secs\":{:.2},\"results\":{}}}", t.elapsed().as_secs_f64(), sols_json(&sols, wm)));
     }

@@ -292,7 +292,10 @@ fn cmd_rkc(a: &Args) -> Result<(), String> {
             let _ = std::io::stderr().flush();
         }
     };
-    let sols = rkc::solve_words(&lm, words.as_ref().map(|w| &w.trie), &cipher, &opts, Some(&mut cb), None);
+    let mut sols = rkc::solve_words(&lm, words.as_ref().map(|w| &w.trie), &cipher, &opts, Some(&mut cb), None);
+    if let Some(w) = &words {
+        rkc::untangle_results(&lm, &w.model, Some(&w.trie), &opts, &mut sols);
+    }
     if !quiet {
         eprintln!();
     }
@@ -855,35 +858,55 @@ fn cmd_bench_run(a: &Args) -> Result<(), String> {
     if a.num("diag", 0)? > 0 {
         return cmd_bench_diag(a, &lm, &cases);
     }
-    println!("{:>4} {:>5} {:>8} {:>8}", "id", "len", "acc%", "secs");
-    let mut by_len: Vec<(usize, Vec<(f64, f64)>)> = vec![];
+    let untangle = a.num("untangle", 1)? > 0;
+    println!("{:>4} {:>5} {:>8} {:>8} {:>8} {:>6} {:>8}", "id", "len", "acc%", "row%", "raw row%", "swaps", "secs");
+    // per length: (pair acc, row acc, row acc before untangling, secs)
+    let mut by_len: Vec<(usize, Vec<(f64, f64, f64, f64)>)> = vec![];
     let total = Instant::now();
     for (id, c, k, p) in &cases {
         let t = Instant::now();
-        let s = rkc::solve_words(&lm, trie, c, &opts, None, None);
+        // --solutions FILE: cache the raw search results (id, key, plain) so the post-processing
+        // can be tuned without re-running the search.
+        let cached = a.flags.get("solutions").and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| {
+            t.lines().find_map(|l| {
+                let f: Vec<&str> = l.split('\t').collect();
+                (f.len() == 3 && f[0] == id.as_str()).then(|| rkc::RkcSolution { key: scrub(f[1]), plain: scrub(f[2]), score: 0.0 })
+            })
+        });
+        let mut s = match cached {
+            Some(sol) => vec![sol],
+            None => {
+                let s = rkc::solve_words(&lm, trie, c, &opts, None, None);
+                if let (Some(f), Some(sol)) = (a.flags.get("solutions"), s.first()) {
+                    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(f).map_err(|e| e.to_string())?;
+                    writeln!(file, "{id}\t{}\t{}", unscrub(&sol.key), unscrub(&sol.plain)).map_err(|e| e.to_string())?;
+                }
+                s
+            }
+        };
+        let raw_row = s.first().map(|s| rkc::row_accuracy(s, k, p)).unwrap_or(0.0);
+        let swaps = match s.first_mut() {
+            Some(s) if untangle => words.as_ref().map_or(0, |w| rkc::untangle(&lm, &w.model, trie, opts.word_weight, s)),
+            _ => 0,
+        };
         let secs = t.elapsed().as_secs_f64();
         let acc = s.first().map(|s| rkc::pair_accuracy(s, k, p)).unwrap_or(0.0);
-        println!("{:>4} {:>5} {:>8.1} {:>8.2}", id, c.len(), acc * 100.0, secs);
+        let row = s.first().map(|s| rkc::row_accuracy(s, k, p)).unwrap_or(0.0);
+        println!("{:>4} {:>5} {:>8.1} {:>8.1} {:>8.1} {:>6} {:>8.2}", id, c.len(), acc * 100.0, row * 100.0, raw_row * 100.0, swaps, secs);
         match by_len.iter_mut().find(|(l, _)| *l == c.len()) {
-            Some((_, v)) => v.push((acc, secs)),
-            None => by_len.push((c.len(), vec![(acc, secs)])),
+            Some((_, v)) => v.push((acc, row, raw_row, secs)),
+            None => by_len.push((c.len(), vec![(acc, row, raw_row, secs)])),
         }
     }
-    println!("\nbeam {}  —  summary by length", opts.beam);
-    println!("{:>5} {:>6} {:>10} {:>10}", "len", "cases", "mean acc%", "mean secs");
+    println!("\nbeam {}  —  summary by length (row% = best single output row against the true key or plaintext)", opts.beam);
+    println!("{:>5} {:>6} {:>10} {:>10} {:>10} {:>10}", "len", "cases", "mean acc%", "row%", "raw row%", "mean secs");
+    let mean = |v: &[(f64, f64, f64, f64)], f: fn(&(f64, f64, f64, f64)) -> f64| v.iter().map(f).sum::<f64>() / v.len().max(1) as f64;
     for (l, v) in &by_len {
-        let n = v.len() as f64;
-        println!(
-            "{:>5} {:>6} {:>10.1} {:>10.2}",
-            l,
-            v.len(),
-            v.iter().map(|x| x.0).sum::<f64>() / n * 100.0,
-            v.iter().map(|x| x.1).sum::<f64>() / n
-        );
+        println!("{:>5} {:>6} {:>10.1} {:>10.1} {:>10.1} {:>10.2}", l, v.len(), mean(v, |x| x.0) * 100.0, mean(v, |x| x.1) * 100.0, mean(v, |x| x.2) * 100.0, mean(v, |x| x.3));
     }
-    let all: Vec<f64> = by_len.iter().flat_map(|(_, v)| v.iter().map(|x| x.0)).collect();
-    let overall = all.iter().sum::<f64>() / all.len().max(1) as f64 * 100.0;
-    println!("overall mean acc {overall:.1}%");
+    let all: Vec<(f64, f64, f64, f64)> = by_len.iter().flat_map(|(_, v)| v.iter().copied()).collect();
+    let overall = mean(&all, |x| x.0) * 100.0;
+    println!("overall mean acc {overall:.1}%  row {:.1}%  (raw row {:.1}%)", mean(&all, |x| x.1) * 100.0, mean(&all, |x| x.2) * 100.0);
     println!("total {:.1}s", total.elapsed().as_secs_f64());
     let min = a.num("min-acc", 0)? as f64;
     if overall < min {

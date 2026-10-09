@@ -377,6 +377,23 @@ impl WordModel {
         Ok(Self::build(words, bigrams, trigrams))
     }
 
+    /// Vocabulary ids of the known words in the best segmentation of `s`, with their
+    /// unigram log-probabilities (unknown stretches are skipped).
+    pub fn known_words(&self, s: &[u8]) -> Vec<(u32, f32)> {
+        let seg = self.segment(s);
+        let mut at = 0;
+        let mut out = Vec::new();
+        for (&l, &oov) in seg.lengths.iter().zip(&seg.oov) {
+            if !oov {
+                if let Some(&w) = self.ids.get(&s[at..at + l]) {
+                    out.push((w, self.lex.uni[w as usize]));
+                }
+            }
+            at += l;
+        }
+        out
+    }
+
     /// Most likely segmentation of `s` into words (out-of-vocabulary stretches allowed
     /// at a penalty, so names and typos do not break the parse). Words are scored with
     /// the bigram model given the best segmentation of the text before them.
