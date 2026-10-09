@@ -16,7 +16,8 @@
 use crate::lm::LangModel;
 use crate::map::U64Map;
 use crate::text::dec;
-use crate::words::{StreamState, WordTrie};
+use crate::map::FxHashMap;
+use crate::words::{StreamState, WordModel, WordTrie};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone, Debug)]
@@ -357,6 +358,223 @@ fn backtrack(cipher: &[u8], backs: &[Back], hyps: &[Hyp], count: usize) -> Vec<R
         .collect()
 }
 
+/// Letters on each side of a candidate swap point that [`untangle`] rescores.
+const UNTANGLE_WINDOW: usize = 24;
+/// A point is a candidate swap point when swapping there costs less than this (nats) locally.
+const UNTANGLE_MAX_COST: f32 = 6.0;
+/// A stretch is only swapped when that beats leaving it by this much (nats): keeps the pass
+/// from disturbing rows that are already coherent.
+const UNTANGLE_MARGIN: f64 = 8.0;
+/// Weight of the generic word frequencies in each row's word cache (pseudo-count).
+const UNTANGLE_PRIOR: f64 = 20.0;
+/// Shorter ciphers are left alone: they rarely swap, and there is too little text to judge.
+pub const UNTANGLE_MIN_LEN: usize = 200;
+
+/// Log-probability of `s[from..to]`, each letter scored with up to `order` letters of context from `s`.
+fn lm_span(lm: &LangModel, s: &[u8], from: usize, to: usize) -> f32 {
+    let deq = lm.deq();
+    let order = lm.order();
+    (from..to)
+        .map(|j| {
+            let start = j.saturating_sub(order);
+            let ctx = s[start..j].iter().fold(0u64, |c, &x| c * 26 + x as u64);
+            deq[lm.row(ctx, j - start)[s[j] as usize] as usize]
+        })
+        .sum()
+}
+
+fn word_score(words: &WordTrie, s: &[u8]) -> f32 {
+    s.iter().fold(StreamState::new(), |st, &x| words.push(&st, x)).score()
+}
+
+/// Change in score from swapping the rows from position `i` on, judged on a window around
+/// `i` by the same models the search uses (so it is almost never positive).
+fn swap_gain(lm: &LangModel, words: Option<&WordTrie>, ww: f32, a: &[u8], b: &[u8], i: usize) -> f32 {
+    let lo = i.saturating_sub(UNTANGLE_WINDOW);
+    let hi = (i + UNTANGLE_WINDOW).min(a.len());
+    let swapped = |x: &[u8], y: &[u8]| -> Vec<u8> { x[lo..i].iter().chain(&y[i..hi]).copied().collect() };
+    let (sa, sb) = (swapped(a, b), swapped(b, a));
+    let (ca, cb) = (&a[lo..hi], &b[lo..hi]);
+    let (f, t) = (i - lo, (i - lo + lm.order()).min(hi - lo));
+    let mut g = lm_span(lm, &sa, f, t) + lm_span(lm, &sb, f, t) - lm_span(lm, ca, f, t) - lm_span(lm, cb, f, t);
+    if let Some(w) = words {
+        g += ww * (word_score(w, &sa) + word_score(w, &sb) - word_score(w, ca) - word_score(w, cb));
+    }
+    g
+}
+
+type Bag = FxHashMap<u32, u32>;
+
+/// Log-likelihood ratio of the words `bag` under a row's word cache (`row`, `total` words)
+/// against generic word frequencies: positive when the row has used these words more than
+/// chance, as a text repeating its own names and topic does.
+fn cache_llr(bag: &Bag, row: &Bag, total: u32, uni: &FxHashMap<u32, f32>) -> f64 {
+    let n = total as f64;
+    bag.iter()
+        .map(|(w, &c)| {
+            let p = (uni[w] as f64).exp();
+            let in_row = row.get(w).copied().unwrap_or(0);
+            c as f64 * ((in_row as f64 + UNTANGLE_PRIOR * p) / (n + UNTANGLE_PRIOR) / p).ln()
+        })
+        .sum()
+}
+
+/// Key and plaintext score alike, so over a long cipher the search can hand a stretch of the
+/// key to the plaintext row and back wherever both texts continue plausibly (often at a word
+/// break): every letter pair is right, but each row reads as two texts spliced together.
+/// The models the search uses cannot see this (they prefer the splice), so this pass looks at
+/// the whole text instead: it cuts the rows at every point where swapping is locally cheap and
+/// assigns each stretch to the row whose other stretches use the same words (names, topic,
+/// narrative voice), paying the local cost of every swap it makes. Letter pairs never change,
+/// only which row each letter is shown in. Returns the number of stretches swapped.
+pub fn untangle(lm: &LangModel, wm: &WordModel, trie: Option<&WordTrie>, word_weight: f32, sol: &mut RkcSolution) -> usize {
+    let n = sol.key.len();
+    if n < UNTANGLE_MIN_LEN {
+        return 0;
+    }
+    let (a, b) = (&sol.key, &sol.plain);
+    // Candidate cut points: locally cheap swaps, at most one per 4 letters (the cheapest).
+    let mut cuts: Vec<(usize, f32)> = Vec::new();
+    for i in 1..n {
+        let g = swap_gain(lm, trie, word_weight, a, b, i);
+        if g <= -UNTANGLE_MAX_COST {
+            continue;
+        }
+        match cuts.last_mut() {
+            Some(last) if i - last.0 <= 3 => {
+                if g > last.1 {
+                    *last = (i, g);
+                }
+            }
+            _ => cuts.push((i, g)),
+        }
+    }
+    if cuts.is_empty() {
+        return 0;
+    }
+    let bounds: Vec<usize> = std::iter::once(0).chain(cuts.iter().map(|c| c.0)).chain(std::iter::once(n)).collect();
+    let m = bounds.len() - 1;
+    let mut uni: FxHashMap<u32, f32> = FxHashMap::default();
+    let bags: Vec<[Bag; 2]> = (0..m)
+        .map(|j| {
+            let (lo, hi) = (bounds[j], bounds[j + 1]);
+            [&a[lo..hi], &b[lo..hi]].map(|s| {
+                let mut bag = Bag::default();
+                for (w, lp) in wm.known_words(s) {
+                    *bag.entry(w).or_default() += 1;
+                    uni.insert(w, lp);
+                }
+                bag
+            })
+        })
+        .collect();
+    // flip[j]: stretch j is shown with its rows swapped. Row r holds bags[j][r ^ flip[j]].
+    let mut flip = vec![false; m];
+    let mut rows: [Bag; 2] = [Bag::default(), Bag::default()];
+    for bag in &bags {
+        for r in 0..2 {
+            for (&w, &c) in &bag[r] {
+                *rows[r].entry(w).or_default() += c;
+            }
+        }
+    }
+    // Local cost of the swaps at the two ends of stretches lo..hi when they are shown flipped
+    // by `toggle` relative to now (swaps inside the range cost the same either way).
+    let ends_cost = |flip: &[bool], lo: usize, hi: usize, toggled: bool| -> f64 {
+        let mut s = 0.0;
+        let f = |j: usize| flip[j] ^ toggled;
+        if lo > 0 && f(lo) != flip[lo - 1] {
+            s += cuts[lo - 1].1 as f64;
+        }
+        if hi < m && f(hi - 1) != flip[hi] {
+            s += cuts[hi - 1].1 as f64;
+        }
+        s
+    };
+    // Moves flip any run of stretches at once: a spliced block of many stretches cannot be
+    // repaired one stretch at a time, since each single flip costs two swaps.
+    const MAX_RUN: usize = 40;
+    for _ in 0..20 {
+        let mut best: Option<(f64, usize, usize)> = None;
+        for lo in 0..m {
+            for hi in lo + 1..=(lo + MAX_RUN).min(m) {
+                // Rows without this run, then the run's words as shown now and as flipped.
+                let mut without = [rows[0].clone(), rows[1].clone()];
+                let mut now = [Bag::default(), Bag::default()];
+                let mut flipped = [Bag::default(), Bag::default()];
+                for j in lo..hi {
+                    for r in 0..2 {
+                        for (&w, &c) in &bags[j][r ^ flip[j] as usize] {
+                            *without[r].get_mut(&w).unwrap() -= c;
+                            *now[r].entry(w).or_default() += c;
+                        }
+                        for (&w, &c) in &bags[j][r ^ !flip[j] as usize] {
+                            *flipped[r].entry(w).or_default() += c;
+                        }
+                    }
+                }
+                let total = |r: usize| without[r].values().sum::<u32>();
+                let (t0, t1) = (total(0), total(1));
+                let score = |bag: &[Bag; 2]| cache_llr(&bag[0], &without[0], t0, &uni) + cache_llr(&bag[1], &without[1], t1, &uni);
+                let gain = score(&flipped) - score(&now) + ends_cost(&flip, lo, hi, true) - ends_cost(&flip, lo, hi, false);
+                if gain > UNTANGLE_MARGIN && best.map_or(true, |b| gain > b.0) {
+                    best = Some((gain, lo, hi));
+                }
+            }
+        }
+        let Some((_, lo, hi)) = best else { break };
+        for j in lo..hi {
+            for r in 0..2 {
+                for (&w, &c) in &bags[j][r ^ flip[j] as usize] {
+                    *rows[r].get_mut(&w).unwrap() -= c;
+                }
+                for (&w, &c) in &bags[j][r ^ !flip[j] as usize] {
+                    *rows[r].entry(w).or_default() += c;
+                }
+            }
+            flip[j] = !flip[j];
+        }
+    }
+    for j in 0..m {
+        if flip[j] {
+            let (lo, hi) = (bounds[j], bounds[j + 1]);
+            sol.key[lo..hi].swap_with_slice(&mut sol.plain[lo..hi]);
+        }
+    }
+    flip.iter().filter(|&&f| f).count()
+}
+
+/// Run [`untangle`] on every solution of a search (unless it had letter hints, which fix
+/// which row is the key), then drop solutions that became duplicates of a better one.
+pub fn untangle_results(lm: &LangModel, wm: &WordModel, trie: Option<&WordTrie>, opts: &RkcOptions, sols: &mut Vec<RkcSolution>) {
+    let hinted = opts.key_hints.iter().chain(&opts.plain_hints).any(|h| h.is_some());
+    if hinted || sols.first().map_or(true, |s| s.key.len() < UNTANGLE_MIN_LEN) {
+        return;
+    }
+    for s in sols.iter_mut() {
+        untangle(lm, wm, trie, opts.word_weight, s);
+    }
+    let mut kept: Vec<RkcSolution> = Vec::with_capacity(sols.len());
+    for s in sols.drain(..) {
+        if !kept.iter().any(|k| (k.key == s.key && k.plain == s.plain) || (k.key == s.plain && k.plain == s.key)) {
+            kept.push(s);
+        }
+    }
+    *sols = kept;
+}
+
+/// Fraction of positions where the better-matching output row equals the true key or plaintext
+/// (the stricter measure: a row that switches between the two texts loses the switched part).
+pub fn row_accuracy(sol: &RkcSolution, key: &[u8], plain: &[u8]) -> f64 {
+    let n = key.len().min(sol.key.len());
+    if n == 0 {
+        return 0.0;
+    }
+    let same = |x: &[u8], y: &[u8]| x[..n].iter().zip(&y[..n]).filter(|(a, b)| a == b).count();
+    let best = same(&sol.key, key).max(same(&sol.key, plain)).max(same(&sol.plain, key)).max(same(&sol.plain, plain));
+    best as f64 / key.len() as f64
+}
+
 /// Fraction of positions where the recovered (key, plain) pair matches the truth,
 /// allowing the two streams to be swapped at any position (they are symmetric).
 pub fn pair_accuracy(sol: &RkcSolution, key: &[u8], plain: &[u8]) -> f64 {
@@ -438,5 +656,31 @@ mod tests {
         opts.plain_hints[3] = Some(4); // 'E'
         let s = &solve(&lm, &c, &opts, None, None)[0];
         assert_eq!(s.plain[3], 4);
+    }
+
+    #[test]
+    fn untangle_regroups_stretches_by_vocabulary() {
+        use crate::testutil::model;
+        // Two "topics" with disjoint vocabularies; the rows are spliced in the middle.
+        let topic = |words: &[&str], seed: usize, n: usize| -> String { (0..n).map(|i| words[(i * 7 + seed * 13 + i * i) % words.len()]).collect::<Vec<_>>().join(" ") };
+        let a_words = ["the", "whale", "harpoon", "captain", "ship", "ocean", "mast", "sailor", "wave", "deck", "storm", "anchor"];
+        let b_words = ["the", "garden", "letter", "morning", "parlour", "carriage", "lady", "dinner", "walk", "sister", "ball", "visit"];
+        let (ta, tb) = (topic(&a_words, 1, 400), topic(&b_words, 2, 400));
+        let wm = WordModel::from_texts(&[ta.clone(), tb.clone()], 2, false);
+        let (key, plain) = (crate::text::scrub(&ta)[..600].to_vec(), crate::text::scrub(&tb)[..600].to_vec());
+        let truth = RkcSolution { key: key.clone(), plain: plain.clone(), score: 0.0 };
+        let mut sol = truth.clone();
+        // Swap two stretches at word boundaries.
+        let edge = |s: &[u8], near: usize| (near..near + 40).find(|&i| wm.segment(&s[..i]).lengths.iter().sum::<usize>() == i && wm.segment(&s[..i + 1]).oov.last() == Some(&false)).unwrap_or(near);
+        let (x, y) = (edge(&key, 150), edge(&key, 380));
+        sol.key[x..y].swap_with_slice(&mut sol.plain[x..y]);
+        let before = row_accuracy(&sol, &key, &plain);
+        eprintln!("DBG x={x} y={y} gains {} {}", swap_gain(model(), None, 0.0, &sol.key, &sol.plain, x), swap_gain(model(), None, 0.0, &sol.key, &sol.plain, y));
+        let nsw = untangle(model(), &wm, None, 0.0, &mut sol);
+        eprintln!("DBG swaps {nsw}");
+        assert_eq!(pair_accuracy(&sol, &key, &plain), 1.0, "letter pairs must not change");
+        assert!(row_accuracy(&sol, &key, &plain) > before + 0.1, "{before} -> {}", row_accuracy(&sol, &key, &plain));
+        let mut short = RkcSolution { key: key[..100].to_vec(), plain: plain[..100].to_vec(), score: 0.0 };
+        assert_eq!(untangle(model(), &wm, None, 0.0, &mut short), 0, "short ciphers are left alone");
     }
 }
