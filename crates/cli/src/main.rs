@@ -206,19 +206,19 @@ fn load_model(a: &Args) -> Result<LangModel, String> {
 }
 
 /// Where each training stage sits on the overall bar: (start, share) of 0..1, roughly in
-/// proportion to the time each takes.
+/// proportion to the time each takes (counting n-grams grows with the corpus, the rest barely).
 fn train_span(stage: TrainStage) -> (f64, f64) {
     match stage {
-        TrainStage::Read => (0.000, 0.025),
-        TrainStage::Count => (0.025, 0.235),
-        TrainStage::Smooth => (0.260, 0.080),
-        TrainStage::Build => (0.340, 0.320),
-        TrainStage::Quantise => (0.660, 0.010),
+        TrainStage::Read => (0.00, 0.03),
+        TrainStage::Count => (0.03, 0.40),
+        TrainStage::Smooth => (0.43, 0.05),
+        TrainStage::Build => (0.48, 0.28),
+        TrainStage::Quantise => (0.76, 0.01),
     }
 }
 
 /// The word model takes the stretch after the language model, up to saving.
-const WORDS_SPAN: (f64, f64) = (0.670, 0.310);
+const WORDS_SPAN: (f64, f64) = (0.77, 0.21);
 
 fn cmd_train(a: &Args) -> Result<(), String> {
     let corpus = corpus_dirs(a);
