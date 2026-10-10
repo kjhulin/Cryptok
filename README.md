@@ -30,6 +30,7 @@ The web UI has these tabs:
 - **Known texts** — slide every source text along the cipher as a candidate key. Add your own sources (lyrics, speeches) with `--sources corpus,path/to/texts`.
 - **Vigenère** — repeating-key Vigenère, optionally over keyword-mixed alphabets.
 - **Transposition** — route transpositions (as in Kryptos K3) and keyed columnar.
+- **Classic ciphers** — one method menu for auto-detect, Caesar/Affine, simple substitution, Beaufort, autokey, rail fence, Playfair, Bifid and Hill 2x2.
 - **Demos** — ready-made ciphertexts that solve in seconds (DEF CON 23, Kryptos K1–K3, running key and Vigenère examples), each labelled with where it comes from and loaded into its solver with one click, for showing the tool to others. You can also pin your own ciphertexts there, with an optional source; they are kept in that browser.
 
 ### Other ciphers (command line)

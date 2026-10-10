@@ -731,6 +731,27 @@ fn route(stream: TcpStream, st: &ServerState, req: &Request) -> std::io::Result<
                 .collect();
             respond(&stream, "200 OK", "application/json", &format!("{{\"secs\":{:.2},\"results\":[{}]}}", t.elapsed().as_secs_f64(), items.join(",")))
         }
+        "/api/classic" => {
+            let text = req.q("text");
+            let letters = scrub(&text).len();
+            if letters < 8 {
+                return respond(&stream, "200 OK", "application/json", "{\"secs\":0,\"results\":[]}");
+            }
+            if letters > max_letters {
+                return too_long(&stream, max_letters);
+            }
+            let Some(_job) = Slot::take(&st.jobs, st.cfg.max_jobs) else { return busy(&stream) };
+            let t = Instant::now();
+            let all = match solve_classic(&st.lm, &req.q("method"), &text, req.num("max_period", 20).clamp(1, 40)) {
+                Ok(all) => all,
+                Err(e) => return respond(&stream, "400 Bad Request", "application/json", &format!("{{\"error\":{}}}", json_str(&e))),
+            };
+            let items: Vec<String> = all
+                .iter()
+                .map(|s| format!("{{\"method\":{},\"detail\":{},\"plain\":{},\"per_letter\":{}}}", json_str(&s.method), json_str(&s.detail), json_str(&s.plain), num(s.per_letter)))
+                .collect();
+            respond(&stream, "200 OK", "application/json", &format!("{{\"secs\":{:.2},\"results\":[{}]}}", t.elapsed().as_secs_f64(), items.join(",")))
+        }
         _ => respond(&stream, "404 Not Found", "text/plain", "not found"),
     }
 }
@@ -741,6 +762,88 @@ fn relayout(original: &str, letters: &[u8]) -> String {
         .chars()
         .map(|ch| if ch.is_ascii_alphabetic() { it.next().map(|&l| (b'A' + l) as char).unwrap_or(ch) } else { ch })
         .collect()
+}
+
+struct ClassicResult {
+    method: String,
+    detail: String,
+    plain: String,
+    per_letter: f32,
+}
+
+/// Run one solver (or `auto`) from the "Classic ciphers" tab, mirroring the CLI commands'
+/// iteration counts. Results are best first, at most three.
+fn solve_classic(lm: &LangModel, method: &str, text: &str, max_period: usize) -> Result<Vec<ClassicResult>, String> {
+    use cryptok_core::{auto, periodic, polygraphic, subst, transpo};
+    let cipher = scrub(text);
+    let n = cipher.len() as f32;
+    let q = || lm.dense(classic::climb_ngram_size(lm, cipher.len()));
+    let res = |method: &str, detail: String, plain: &[u8], per_letter: f32| ClassicResult { method: method.into(), detail, plain: relayout(text, plain), per_letter };
+    let mut out = Vec::new();
+    match method {
+        "auto" => {
+            // The running key solver has its own tab and is slow; leave it out here.
+            let opt = auto::AutoOptions { rkc_max_len: 0, ..Default::default() };
+            for a in auto::auto_solve(lm, text, &opt).iter().take(3) {
+                out.push(res(&a.solver, a.detail.clone(), &a.plain, a.per_letter));
+            }
+        }
+        "affine" => {
+            for c in subst::solve_affine_family(lm, &cipher, 3) {
+                out.push(res("Caesar/Affine", c.description, &c.plain, c.per_letter));
+            }
+        }
+        "subst" => {
+            let c = subst::solve_substitution(lm, &q(), &cipher, 200, 1);
+            out.push(res("Substitution", c.description, &c.plain, c.per_letter));
+        }
+        "beaufort" => {
+            let q = q();
+            let mut all = Vec::new();
+            for mode in [periodic::Mode::Beaufort, periodic::Mode::VariantBeaufort] {
+                all.extend(periodic::solve_periodic(lm, &q, &cipher, &mode, max_period, 20).into_iter().take(3));
+            }
+            let pen = 26f32.ln();
+            all.sort_by(|x, y| (y.score - y.period as f32 * pen).total_cmp(&(x.score - x.period as f32 * pen)));
+            for s in all.iter().take(3) {
+                out.push(res(&s.mode, format!("period {}, key {}", s.period, s.key), &s.plain, s.per_letter()));
+            }
+        }
+        "autokey" => {
+            for s in periodic::solve_autokey(lm, &q(), &cipher, 12, 10).iter().take(3) {
+                let kind = if s.kind == periodic::Autokey::Plaintext { "plaintext autokey" } else { "ciphertext autokey" };
+                out.push(res(kind, format!("primer {}", unscrub(&s.primer)), &s.plain, s.score / n));
+            }
+        }
+        "rail" => {
+            for s in transpo::solve_rail_fence(lm, text, 20, 3) {
+                out.push(ClassicResult { method: "Rail fence".into(), detail: s.describe(), plain: s.text, per_letter: s.per_letter });
+            }
+        }
+        "playfair" | "bifid" => {
+            if cipher.len() < 20 {
+                return Err("Playfair and Bifid need at least 20 letters.".into());
+            }
+            let q = q();
+            if method == "playfair" {
+                let s = polygraphic::solve_playfair(lm, &q, &cipher, 500_000, 32, 1);
+                out.push(res("Playfair", format!("square {}", polygraphic::square_string(&s.square)), &s.plain, s.score / n));
+            } else {
+                for s in polygraphic::solve_bifid(lm, &q, &cipher, &[0, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12], 100_000, 4, 1).iter().take(3) {
+                    out.push(res("Bifid", format!("period {}, square {}", s.period, polygraphic::square_string(&s.square)), &s.plain, s.score / n));
+                }
+            }
+        }
+        "hill" => {
+            let even = &cipher[..cipher.len() / 2 * 2];
+            for s in polygraphic::solve_hill2(lm, &q(), even, 3) {
+                let m = s.matrix;
+                out.push(res("Hill 2x2", format!("key [{} {}; {} {}]", m[0], m[1], m[2], m[3]), &s.plain, s.score / n));
+            }
+        }
+        _ => return Err("Unknown method.".into()),
+    }
+    Ok(out)
 }
 
 fn parse_hint(h: &str, n: usize) -> Vec<Option<u8>> {
@@ -957,5 +1060,27 @@ mod tests {
         assert!(strict.contains("script-src 'nonce-abc'") && !strict.contains("jsdelivr") && !strict.contains("unsafe-inline'; style"));
         assert!(csp("abc", true).contains("cdn.jsdelivr.net"));
         assert!(strict.contains("default-src 'none'") && strict.contains("frame-ancestors 'none'"));
+    }
+
+    #[test]
+    fn classic_dispatch_recovers_ciphers() {
+        use cryptok_core::{periodic, subst, text::scrub, transpo};
+        // Needs the trained model (`cryptok train`), as in CI.
+        let Ok(lm) = LangModel::load(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../cryptok.cklm"))) else {
+            eprintln!("skipped: no trained model");
+            return;
+        };
+        let plain = "It was the best of times, it was the worst of times, it was the age of wisdom, it was the age of foolishness, it was the epoch of belief, it was the epoch of incredulity";
+        let p = scrub(plain);
+        let cases = [
+            ("affine", unscrub(&subst::affine_encrypt(&p, 5, 8))),
+            ("beaufort", unscrub(&periodic::encrypt(&periodic::Mode::Beaufort, &p, &[3, 14, 7]))),
+            ("rail", unscrub(&transpo::rail_fence_encrypt(&p, 4, 0))),
+        ];
+        for (method, cipher) in cases {
+            let r = solve_classic(&lm, method, &cipher, 20).unwrap();
+            assert_eq!(scrub(&r[0].plain), p, "{method}");
+        }
+        assert!(solve_classic(&lm, "nope", plain, 20).is_err());
     }
 }
