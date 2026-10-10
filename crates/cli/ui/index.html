@@ -137,6 +137,7 @@ pre.plain { white-space: pre-wrap; word-break: break-all; font: 14px/1.6 var(--m
     <button role="tab" aria-selected="false" data-tab="known">Known texts</button>
     <button role="tab" aria-selected="false" data-tab="vig">Vigenère</button>
     <button role="tab" aria-selected="false" data-tab="trans">Transposition</button>
+    <button role="tab" aria-selected="false" data-tab="classic">Classic ciphers</button>
     <button role="tab" aria-selected="false" data-tab="demos">Demos</button>
   </nav>
   <div id="status">Loading model…</div>
@@ -280,6 +281,34 @@ pre.plain { white-space: pre-wrap; word-break: break-all; font: 14px/1.6 var(--m
       <div id="trans-results"><p class="empty">Tries route transpositions (one or two steps, every width and direction, as in Kryptos K3) and keyed columnar transpositions up to 12 columns.</p></div>
     </div>
     <aside></aside>
+  </section>
+
+  <!-- Classic ciphers -->
+  <section class="panel" id="p-classic" role="tabpanel">
+    <div>
+      <div class="bar">
+        <button class="primary" id="classic-run">Solve</button>
+        <span class="count" id="classic-time"></span>
+      </div>
+      <div id="classic-results"><p class="empty">Pick a cipher, or let the tool detect it. Playfair and Bifid can take 10 to 30 seconds.</p></div>
+    </div>
+    <aside>
+      <div class="group kv">
+        <label for="classic-method">Method</label>
+        <select id="classic-method">
+          <option value="auto">Auto-detect</option>
+          <option value="affine">Caesar / Affine</option>
+          <option value="subst">Simple substitution</option>
+          <option value="beaufort">Beaufort / Variant Beaufort</option>
+          <option value="autokey">Autokey</option>
+          <option value="rail">Rail fence</option>
+          <option value="playfair">Playfair</option>
+          <option value="bifid">Bifid</option>
+          <option value="hill">Hill 2x2</option>
+        </select>
+      </div>
+      <p class="note">Beaufort and Variant Beaufort search keys up to the length set on the Vigenère tab. Playfair and Bifid need at least 20 letters.</p>
+    </aside>
   </section>
 
   <!-- Demos -->
@@ -780,6 +809,20 @@ $('#trans-run').addEventListener('click', () => {
   }).finally(() => { btn.disabled = false; });
 });
 
+// ---------- classic ciphers
+$('#classic-run').addEventListener('click', () => {
+  const btn = $('#classic-run'); btn.disabled = true;
+  $('#classic-results').innerHTML = '<p class="empty">Solving…</p>';
+  fetch(`api/classic?text=${encodeURIComponent($('#cipher').value)}&method=${$('#classic-method').value}&max_period=${$('#maxp').value}`)
+    .then((r) => r.json()).then((d) => {
+      if (d.error) { $('#classic-results').innerHTML = `<p class="err">${esc(d.error)}</p>`; return; }
+      $('#classic-time').textContent = `${d.secs.toFixed(2)} s`;
+      $('#classic-results').innerHTML = d.results.map((r, k) => `<div class="result"><header><strong>${k === 0 ? 'Best' : '#' + (k + 1)}: ${esc(r.method)}</strong>
+        <span class="score">${esc(r.detail)}, ${r.per_letter.toFixed(3)} per letter</span></header>
+        <pre class="plain">${esc(r.plain)}</pre></div>`).join('') || '<p class="empty">Need at least 8 letters.</p>';
+    }).finally(() => { btn.disabled = false; });
+});
+
 // ---------- demos
 // Every entry was checked to solve with the server's default settings (order-6 model, beam 20,000).
 // tab: where Load takes you. Answers are shown only when the presenter opens them.
@@ -839,7 +882,7 @@ ECDMRIPFEIMEHNLSSTTRTVDOHW?`,
     answer: 'THE TREASURE IS BURIED UNDER THE THIRD OAK TREE PAST THE STONE BRIDGE...' },
 ];
 
-const TAB_NAMES = { rkc: 'Running key', known: 'Known texts', vig: 'Vigenère', trans: 'Transposition' };
+const TAB_NAMES = { rkc: 'Running key', known: 'Known texts', vig: 'Vigenère', trans: 'Transposition', classic: 'Classic ciphers' };
 const MINE_KEY = 'cryptok.pinned';
 const loadMine = () => { try { return JSON.parse(localStorage.getItem(MINE_KEY)) || []; } catch { return []; } };
 const saveMine = (list) => { try { localStorage.setItem(MINE_KEY, JSON.stringify(list)); return true; } catch { return false; } };
