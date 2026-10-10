@@ -153,11 +153,42 @@ fn vocabulary(counts: FxHashMap<Vec<u8>, u32>, min_count: u32) -> Vec<(Vec<u8>, 
     kept
 }
 
-/// How progress splits across the stages of building a word model: reading the files, then
-/// (of the rest) counting words, then counting pairs, then the remaining work (triples, tables).
-const READ_SHARE: f64 = 0.05;
-const COUNT_SHARE: f64 = 0.45;
-const PAIR_SHARE: f64 = 0.8;
+/// How progress splits across the stages of building a word model: tokenising the texts
+/// (reading the files too, when [`WordModel::from_corpus_progress`] does it), counting pairs,
+/// then the remaining work (triples, tables).
+const TOKEN_SHARE: f64 = 0.50;
+const PAIR_SHARE: f64 = 0.12;
+
+/// Turns words into small integer ids as the texts are scanned, so that later passes work on
+/// integers instead of hashing the same words again.
+#[derive(Default)]
+struct Interner {
+    ids: FxHashMap<Vec<u8>, u32>,
+    words: Vec<Vec<u8>>,
+    counts: Vec<u32>,
+}
+
+impl Interner {
+    /// The id of `w`, counting one more occurrence. Only a new word allocates.
+    fn count(&mut self, w: &[u8]) -> u32 {
+        if let Some(&i) = self.ids.get(w) {
+            self.counts[i as usize] += 1;
+            return i;
+        }
+        let i = self.words.len() as u32;
+        self.ids.insert(w.to_vec(), i);
+        self.words.push(w.to_vec());
+        self.counts.push(1);
+        i
+    }
+
+    /// Scan one text into a stream of word ids, with `NONE` at sentence breaks.
+    fn tokenize(&mut self, text: &str) -> Vec<u32> {
+        let mut stream = Vec::with_capacity(text.len() / 6);
+        scan(text, |w| stream.push(w.map_or(NONE, |w| self.count(w))));
+        stream
+    }
+}
 
 impl WordModel {
     /// Build from raw text files in the corpus directories (Gutenberg boilerplate stripped),
@@ -168,16 +199,19 @@ impl WordModel {
     }
 
     /// [`from_corpus`](Self::from_corpus) that reports the fraction done (0.0 to 1.0) as it goes.
+    /// Each file is reduced to word ids as soon as it is read, so the corpus text is never all
+    /// in memory at once.
     pub fn from_corpus_progress(dirs: &[PathBuf], exclude: &[String], min_count: u32, trigrams: bool, progress: &dyn Fn(f64)) -> io::Result<Self> {
         let names = crate::text::corpus_files(dirs, exclude)?;
         let total = names.len().max(1) as f64;
-        let mut texts = Vec::with_capacity(names.len());
+        let mut interner = Interner::default();
+        let mut streams = Vec::with_capacity(names.len());
         for (i, p) in names.iter().enumerate() {
-            progress(READ_SHARE * i as f64 / total);
+            progress(TOKEN_SHARE * i as f64 / total);
             let bytes = fs::read(p)?;
-            texts.push(strip_gutenberg(&String::from_utf8_lossy(&bytes)).to_string());
+            streams.push(interner.tokenize(strip_gutenberg(&String::from_utf8_lossy(&bytes))));
         }
-        Ok(Self::from_texts_progress(&texts, min_count, trigrams, progress))
+        Ok(Self::from_streams(interner, streams, min_count, trigrams, progress))
     }
 
     /// Build from in-memory texts: word counts, then counts of adjacent in-vocabulary pairs.
@@ -186,47 +220,57 @@ impl WordModel {
     }
 
     /// [`from_texts`](Self::from_texts) that reports the fraction done (0.0 to 1.0) as it goes.
-    /// Reading the files (when [`from_corpus_progress`](Self::from_corpus_progress) does it)
-    /// takes the first `READ_SHARE`; counting and pairing split the rest.
     pub fn from_texts_progress<S: AsRef<str>>(texts: &[S], min_count: u32, trigrams: bool, progress: &dyn Fn(f64)) -> Self {
         let n = texts.len().max(1) as f64;
-        let mut counts: FxHashMap<Vec<u8>, u32> = FxHashMap::default();
+        let mut interner = Interner::default();
+        let mut streams = Vec::with_capacity(texts.len());
         for (i, t) in texts.iter().enumerate() {
-            progress(READ_SHARE + (1.0 - READ_SHARE) * COUNT_SHARE * i as f64 / n);
-            scan(t.as_ref(), |w| {
-                if let Some(w) = w {
-                    *counts.entry(w.to_vec()).or_insert(0) += 1;
-                }
-            });
+            progress(TOKEN_SHARE * i as f64 / n);
+            streams.push(interner.tokenize(t.as_ref()));
         }
+        Self::from_streams(interner, streams, min_count, trigrams, progress)
+    }
+
+    /// The shared back half: pick the vocabulary, then count adjacent pairs (and triples) of
+    /// in-vocabulary words in the id streams.
+    fn from_streams(interner: Interner, streams: Vec<Vec<u32>>, min_count: u32, trigrams: bool, progress: &dyn Fn(f64)) -> Self {
+        let Interner { ids, words: seen_words, counts } = interner;
+        let counts: FxHashMap<Vec<u8>, u32> = seen_words.iter().cloned().zip(counts).collect();
         let words = vocabulary(counts, min_count);
-        let ids: FxHashMap<Vec<u8>, u32> = words.iter().enumerate().map(|(i, (w, _))| (w.clone(), i as u32)).collect();
+        // Interner id -> vocabulary id (NONE for words that were dropped).
+        let mut remap = vec![NONE; seen_words.len()];
+        for (new, (w, _)) in words.iter().enumerate() {
+            remap[ids[w] as usize] = new as u32;
+        }
+        drop((ids, seen_words));
+        let vocab_id = |t: u32| if t == NONE { NONE } else { remap[t as usize] };
+        let n = streams.len().max(1) as f64;
         let mut pairs: FxHashMap<u64, u32> = FxHashMap::default();
-        for (i, t) in texts.iter().enumerate() {
-            progress(READ_SHARE + (1.0 - READ_SHARE) * (COUNT_SHARE + (1.0 - COUNT_SHARE) * PAIR_SHARE * i as f64 / n));
+        for (i, stream) in streams.iter().enumerate() {
+            progress(TOKEN_SHARE + PAIR_SHARE * i as f64 / n);
             let mut prev = NONE;
-            scan(t.as_ref(), |w| {
-                let id = w.and_then(|w| ids.get(w).copied()).unwrap_or(NONE);
+            for &t in stream {
+                let id = vocab_id(t);
                 if prev != NONE && id != NONE {
                     *pairs.entry(pair_key(prev, id)).or_insert(0) += 1;
                 }
                 prev = id;
-            });
+            }
         }
         let bigrams: Vec<(u32, u32, u32)> = pairs.into_iter().filter(|&(_, c)| c >= MIN_BIGRAM).map(|(k, c)| ((k >> 32) as u32, k as u32, c)).collect();
         // Triples whose two-word prefix and suffix are stored pairs.
         let stored: std::collections::HashSet<u64> = bigrams.iter().map(|&(v, w, _)| pair_key(v, w)).collect();
         let mut triples: FxHashMap<u64, u32> = FxHashMap::default();
-        for t in texts.iter().filter(|_| trigrams) {
+        for stream in streams.iter().filter(|_| trigrams) {
             let (mut a, mut b) = (NONE, NONE);
-            scan(t.as_ref(), |w| {
-                let id = w.and_then(|w| ids.get(w).copied()).unwrap_or(NONE);
+            for &t in stream {
+                let id = vocab_id(t);
                 if a != NONE && b != NONE && id != NONE && stored.contains(&pair_key(a, b)) && stored.contains(&pair_key(b, id)) {
                     *triples.entry(tri_key(a, b, id)).or_insert(0) += 1;
                 }
                 a = b;
                 b = id;
-            });
+            }
         }
         let trigrams = triples
             .into_iter()

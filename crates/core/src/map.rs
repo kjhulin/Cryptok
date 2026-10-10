@@ -10,7 +10,11 @@ pub struct FxHasher(u64);
 impl Hasher for FxHasher {
     #[inline]
     fn finish(&self) -> u64 {
-        self.0
+        // A multiply only carries information upwards, so the low bits (which pick the bucket)
+        // would depend on the low bits of the key alone: packed n-grams that differ only in
+        // their high part, such as word pairs ending in the same word, would all collide.
+        // Rotating brings the well-mixed high bits down.
+        self.0.rotate_left(26)
     }
     #[inline]
     fn write(&mut self, bytes: &[u8]) {
@@ -154,6 +158,16 @@ impl U64Map {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Keys that differ only in their high half (word pairs sharing a second word) must still
+    /// spread over the buckets, which are picked by the low bits of the hash.
+    #[test]
+    fn fx_hash_spreads_keys_that_differ_in_high_bits() {
+        use std::hash::BuildHasher;
+        let build = BuildHasherDefault::<FxHasher>::default();
+        let buckets: std::collections::HashSet<u64> = (0..2000u64).map(|v| build.hash_one((v << 32) | 7) & 0xFFFF).collect();
+        assert!(buckets.len() > 1800, "only {} distinct buckets for 2000 keys", buckets.len());
+    }
 
     #[test]
     fn map_basic() {
